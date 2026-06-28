@@ -69,12 +69,17 @@ function ConnectCard({
           </Text>
         </div>
         {connected ? (
-          <span className="row" style={{ gap: 6, color: "var(--ok)", flex: "none" }}>
-            <CheckCircledIcon width={18} height={18} />
-            <Text size="2" weight="medium" style={{ color: "var(--ok)" }}>
-              Connected
-            </Text>
-            <Button size="1" variant="ghost" color="gray" disabled={busy} onClick={onConnect}>
+          <span className="row" style={{ gap: 12, flex: "none" }}>
+            <span
+              className="row"
+              style={{ gap: 5, color: "var(--ok)", whiteSpace: "nowrap" }}
+            >
+              <CheckCircledIcon width={16} height={16} />
+              <Text size="2" weight="medium" style={{ color: "var(--ok)" }}>
+                Connected
+              </Text>
+            </span>
+            <Button size="1" variant="soft" color="gray" disabled={busy} onClick={onConnect}>
               {busy ? <Spinner size="1" /> : "Update"}
             </Button>
           </span>
