@@ -5,6 +5,7 @@ import type {
   AppConfig,
   AppListItem,
   AppRunSnapshot,
+  ClaudeStatus,
   Detection,
   LogLine,
   McpInfo,
@@ -34,6 +35,9 @@ export const api = {
   exportApp: (app: string) => invoke<string>("export_app", { app }),
   showMainWindow: (select?: string) =>
     invoke<void>("show_main_window", { select }),
+  claudeStatus: () => invoke<ClaudeStatus>("claude_status"),
+  connectClaudeCode: () => invoke<string>("connect_claude_code"),
+  connectClaudeDesktop: () => invoke<string>("connect_claude_desktop"),
 };
 
 /** Native macOS folder picker; returns the chosen directory or null. */

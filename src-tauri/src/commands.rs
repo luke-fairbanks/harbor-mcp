@@ -180,6 +180,147 @@ pub async fn import_app(state: State<'_, Arc<AppState>>, path: String) -> Result
     Ok(cfg)
 }
 
+// ---------------------------------------------------------------------------
+// Claude connection — make "Connect your Claude" one click.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct ClaudeStatus {
+    /// `claude` CLI is installed and found.
+    #[serde(rename = "codeCli")]
+    pub code_cli: bool,
+    /// Harbor is registered in Claude Code (user scope).
+    #[serde(rename = "codeConnected")]
+    pub code_connected: bool,
+    /// Claude Desktop appears installed (its config dir exists).
+    #[serde(rename = "desktopInstalled")]
+    pub desktop_installed: bool,
+    /// Harbor is present in claude_desktop_config.json.
+    #[serde(rename = "desktopConnected")]
+    pub desktop_connected: bool,
+}
+
+fn claude_desktop_config_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join("Library/Application Support/Claude/claude_desktop_config.json"))
+}
+
+#[tauri::command]
+pub async fn claude_status(state: State<'_, Arc<AppState>>) -> Result<ClaudeStatus, String> {
+    let _ = &state; // touched for symmetry; status doesn't need live state
+    let claude = crate::sysenv::resolve_bin("claude");
+    let code_cli = claude.is_some();
+    let mut code_connected = false;
+    if let Some(bin) = &claude {
+        let out = tokio::process::Command::new(bin)
+            .args(["mcp", "get", "harbor"])
+            .env("PATH", crate::sysenv::enriched_path().unwrap_or_default())
+            .output()
+            .await;
+        if let Ok(o) = out {
+            code_connected = o.status.success();
+        }
+    }
+
+    let cfg = claude_desktop_config_path();
+    let desktop_installed = cfg
+        .as_ref()
+        .and_then(|p| p.parent().map(|d| d.exists()))
+        .unwrap_or(false);
+    let mut desktop_connected = false;
+    if let Some(p) = &cfg {
+        if let Ok(text) = std::fs::read_to_string(p) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                desktop_connected = v
+                    .get("mcpServers")
+                    .and_then(|m| m.get("harbor"))
+                    .is_some();
+            }
+        }
+    }
+
+    Ok(ClaudeStatus {
+        code_cli,
+        code_connected,
+        desktop_installed,
+        desktop_connected,
+    })
+}
+
+#[tauri::command]
+pub async fn connect_claude_code(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let bin = crate::sysenv::resolve_bin("claude")
+        .ok_or("Claude Code CLI (`claude`) not found.")?;
+    let url = format!("http://127.0.0.1:{}/mcp", state.mcp.port);
+    let header = format!("Authorization: Bearer {}", state.mcp.token);
+    let path = crate::sysenv::enriched_path().unwrap_or_default();
+
+    // Remove any prior entry first so reconnecting refreshes the token/port.
+    let _ = tokio::process::Command::new(&bin)
+        .args(["mcp", "remove", "-s", "user", "harbor"])
+        .env("PATH", &path)
+        .output()
+        .await;
+
+    let out = tokio::process::Command::new(&bin)
+        .args([
+            "mcp", "add", "-s", "user", "--transport", "http", "harbor", &url, "--header",
+            &header,
+        ])
+        .env("PATH", &path)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if out.status.success() {
+        Ok("Connected to Claude Code.".to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn connect_claude_desktop(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let p = claude_desktop_config_path().ok_or("could not resolve Claude Desktop config path")?;
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+
+    let mut root: serde_json::Value = if p.exists() {
+        let text = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
+        // Back up the original before we touch it.
+        let _ = std::fs::write(p.with_extension("json.harbor-bak"), &text);
+        serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+
+    let entry = serde_json::json!({
+        "type": "http",
+        "url": format!("http://127.0.0.1:{}/mcp", state.mcp.port),
+        "headers": { "Authorization": format!("Bearer {}", state.mcp.token) }
+    });
+
+    let obj = root.as_object_mut().unwrap();
+    let servers = obj
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    if !servers.is_object() {
+        *servers = serde_json::json!({});
+    }
+    servers
+        .as_object_mut()
+        .unwrap()
+        .insert("harbor".to_string(), entry);
+
+    let text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(&p, text).map_err(|e| e.to_string())?;
+    Ok("Added to Claude Desktop — restart it to use Harbor.".to_string())
+}
+
 /// Bring the main window to the front (from the tray panel), optionally selecting
 /// an app there.
 #[tauri::command]

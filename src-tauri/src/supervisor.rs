@@ -52,76 +52,6 @@ pub struct Supervisor {
     user_path: Option<String>,
 }
 
-/// Build a `PATH` that finds the user's toolchains (nvm/Homebrew/asdf) even when
-/// Harbor is launched from Finder (minimal `/usr/bin:/bin` PATH). This is
-/// **deterministic and shell-free** — spawning an interactive login shell to
-/// read `$PATH` hangs without a tty, so we resolve the well-known locations
-/// directly. Inherited PATH comes first (preserves an explicit dev setup), then
-/// nvm's default + installed versions, then Homebrew and friends.
-fn resolve_user_path() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let mut dirs: Vec<String> = Vec::new();
-    fn add(dirs: &mut Vec<String>, p: String) {
-        if !p.is_empty() && std::path::Path::new(&p).is_dir() && !dirs.contains(&p) {
-            dirs.push(p);
-        }
-    }
-
-    // 1. inherited PATH first
-    if let Ok(cur) = std::env::var("PATH") {
-        for p in cur.split(':') {
-            add(&mut dirs, p.to_string());
-        }
-    }
-
-    // 2. nvm: the configured default version, then all installed (newest first)
-    let nvm_node = std::path::Path::new(&home).join(".nvm/versions/node");
-    if let Ok(def) =
-        std::fs::read_to_string(std::path::Path::new(&home).join(".nvm/alias/default"))
-    {
-        let want = def.trim().trim_start_matches('v');
-        add(
-            &mut dirs,
-            nvm_node
-                .join(format!("v{want}"))
-                .join("bin")
-                .to_string_lossy()
-                .into_owned(),
-        );
-    }
-    if let Ok(rd) = std::fs::read_dir(&nvm_node) {
-        let mut versions: Vec<_> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
-        versions.sort();
-        for v in versions.into_iter().rev() {
-            add(&mut dirs, v.join("bin").to_string_lossy().into_owned());
-        }
-    }
-
-    // 3. Homebrew, asdf, and common user bins
-    let extra: Vec<String> = vec![
-        "/opt/homebrew/bin".into(),
-        "/opt/homebrew/sbin".into(),
-        "/usr/local/bin".into(),
-        format!("{home}/.asdf/shims"),
-        format!("{home}/.bun/bin"),
-        format!("{home}/.local/bin"),
-        format!("{home}/.cargo/bin"),
-        "/usr/bin".into(),
-        "/bin".into(),
-        "/usr/sbin".into(),
-        "/sbin".into(),
-    ];
-    for p in extra {
-        add(&mut dirs, p);
-    }
-
-    if dirs.is_empty() {
-        None
-    } else {
-        Some(dirs.join(":"))
-    }
-}
-
 /// Live state of one app instance.
 struct AppRun {
     profile: Option<String>,
@@ -163,7 +93,7 @@ fn now_millis() -> u64 {
 
 impl Supervisor {
     pub fn new(app: AppHandle) -> Self {
-        let user_path = resolve_user_path();
+        let user_path = crate::sysenv::enriched_path();
         Supervisor {
             app,
             runs: Arc::new(Mutex::new(BTreeMap::new())),

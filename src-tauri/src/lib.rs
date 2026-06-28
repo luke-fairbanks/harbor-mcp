@@ -11,6 +11,7 @@ mod ports;
 mod state;
 mod store;
 mod supervisor;
+mod sysenv;
 mod tray;
 
 use state::AppState;
@@ -135,6 +136,9 @@ pub fn run() {
             commands::import_app,
             commands::export_app,
             commands::show_main_window,
+            commands::claude_status,
+            commands::connect_claude_code,
+            commands::connect_claude_desktop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

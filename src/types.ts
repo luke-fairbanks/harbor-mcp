@@ -91,3 +91,10 @@ export interface Detection {
   proposed: AppConfig;
   notes: string[];
 }
+
+export interface ClaudeStatus {
+  codeCli: boolean;
+  codeConnected: boolean;
+  desktopInstalled: boolean;
+  desktopConnected: boolean;
+}
