@@ -9,6 +9,7 @@ import { AppDetail } from "./components/AppDetail";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { RegisterDialog } from "./components/RegisterDialog";
 import { AnchorMark } from "./components/icons";
+import { startWindowDrag } from "./titlebar";
 
 const LOG_CAP = 4000;
 
@@ -75,10 +76,10 @@ export default function App() {
 
   return (
     <div className="harbor-shell">
-      <div className="drag-strip" data-tauri-drag-region />
+      <div className="drag-strip" onMouseDown={startWindowDrag} />
 
       <aside className="harbor-sidebar">
-        <div className="sidebar-head">
+        <div className="sidebar-head" onMouseDown={startWindowDrag}>
           <span className="sidebar-brand">
             <span style={{ color: "var(--accent)", display: "inline-flex" }}>
               <AnchorMark size={17} />

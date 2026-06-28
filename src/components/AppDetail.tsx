@@ -15,6 +15,7 @@ import { StatusBadge, StatusDot } from "./StatusDot";
 import { LogPane } from "./LogPane";
 import { ConfigEditor } from "./ConfigEditor";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { startWindowDrag } from "../titlebar";
 
 export function AppDetail({
   item,
@@ -78,10 +79,12 @@ export function AppDetail({
 
   return (
     <>
-      <div className="detail-head">
+      <div className="detail-head" onMouseDown={startWindowDrag}>
         <div style={{ minWidth: 0 }}>
           <div className="detail-title">{cfg.name}</div>
-          <div className="detail-sub">{cfg.root}</div>
+          <div className="detail-sub" data-no-drag>
+            {cfg.root}
+          </div>
         </div>
         <div className="row" style={{ flex: "none" }}>
           {!running && profiles.length > 1 && (
