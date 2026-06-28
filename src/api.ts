@@ -32,6 +32,8 @@ export const api = {
   mcpInfo: () => invoke<McpInfo>("mcp_info"),
   importApp: (path: string) => invoke<AppConfig>("import_app", { path }),
   exportApp: (app: string) => invoke<string>("export_app", { app }),
+  showMainWindow: (select?: string) =>
+    invoke<void>("show_main_window", { select }),
 };
 
 /** Native macOS folder picker; returns the chosen directory or null. */
@@ -49,4 +51,9 @@ export function onLog(cb: (l: LogLine) => void): Promise<UnlistenFn> {
 
 export function onStatus(cb: (s: StatusEvent) => void): Promise<UnlistenFn> {
   return listen<StatusEvent>(STATUS_EVENT, (e) => cb(e.payload));
+}
+
+/** Fired when the tray panel asks the main window to focus + select an app. */
+export function onSelect(cb: (app: string) => void): Promise<UnlistenFn> {
+  return listen<string>("harbor://select", (e) => cb(e.payload));
 }

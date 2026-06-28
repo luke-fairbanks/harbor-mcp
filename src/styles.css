@@ -619,3 +619,114 @@ body,
     0 0 0 0.5px var(--hair-2),
     0 4px 14px rgba(0, 0, 0, 0.10);
 }
+
+/* ============================================================================
+   Menu-bar popover panel (the "tray" window)
+   ========================================================================== */
+.tray-panel {
+  height: 100vh;
+  width: 100vw;
+  background: var(--panel-bg);
+  border: 0.5px solid var(--hair);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--text);
+}
+.tray-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 12px 10px;
+  border-bottom: 0.5px solid var(--hair);
+}
+.tray-brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 650;
+  font-size: 13.5px;
+  letter-spacing: -0.01em;
+}
+.tray-sub {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-3);
+  text-align: right;
+  margin-right: 2px;
+}
+.tray-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+}
+.tray-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px;
+  border-radius: 8px;
+}
+.tray-row:hover {
+  background: var(--sidebar-hover);
+}
+.tray-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  cursor: default;
+  text-align: left;
+}
+.tray-name:hover {
+  color: var(--accent);
+}
+.tray-port {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+.tray-act {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  cursor: default;
+  transition: background-color 120ms var(--ease-out), color 120ms var(--ease-out);
+}
+.tray-act:hover:not(:disabled) {
+  background: var(--sidebar-sel);
+  color: var(--text);
+}
+.tray-act.go:hover:not(:disabled) {
+  color: var(--ok);
+}
+.tray-act.danger:hover:not(:disabled) {
+  color: var(--danger);
+}
+.tray-act:disabled {
+  opacity: 0.4;
+}
+.tray-empty {
+  padding: 22px 14px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  text-align: center;
+  line-height: 1.5;
+}

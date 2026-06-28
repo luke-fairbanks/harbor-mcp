@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Tooltip } from "@radix-ui/themes";
 import { GearIcon, PlusIcon } from "@radix-ui/react-icons";
 import { motion } from "framer-motion";
-import { api, onLog, onStatus } from "./api";
+import { api, onLog, onSelect, onStatus } from "./api";
 import type { AppListItem, AppRunSnapshot, LogLine } from "./types";
 import { StatusDot, aggregateStatus } from "./components/StatusDot";
 import { AppDetail } from "./components/AppDetail";
@@ -52,6 +52,7 @@ export default function App() {
     let cancelled = false;
     let offLog: (() => void) | undefined;
     let offStatus: (() => void) | undefined;
+    let offSelect: (() => void) | undefined;
 
     onLog((l) => {
       setLogs((prev) => {
@@ -65,10 +66,17 @@ export default function App() {
       cancelled ? u() : (offStatus = u),
     );
 
+    // From the tray panel: focus this window and select the app.
+    onSelect((name) => {
+      setSelected(name);
+      setView("app");
+    }).then((u) => (cancelled ? u() : (offSelect = u)));
+
     return () => {
       cancelled = true;
       offLog?.();
       offStatus?.();
+      offSelect?.();
     };
   }, [refreshApp]);
 

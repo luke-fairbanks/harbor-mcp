@@ -11,6 +11,7 @@ mod ports;
 mod state;
 mod store;
 mod supervisor;
+mod tray;
 
 use state::AppState;
 use std::sync::Arc;
@@ -35,8 +36,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        // Remember window size/position across launches.
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Remember window size/position across launches. The tray popover is
+        // excluded so it always starts hidden (its visibility is driven by the
+        // tray icon, not restored state).
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_denylist(&[tray::TRAY_LABEL])
+                .build(),
+        )
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -98,6 +105,11 @@ pub fn run() {
                 }
             });
 
+            // Menu-bar tray icon + popover panel.
+            if let Err(e) = tray::setup(&handle) {
+                eprintln!("[harbor] tray setup failed: {e}");
+            }
+
             // Window is created hidden (config `visible: false`) to avoid the
             // transparent-window white flash; reveal once setup is done.
             if let Some(win) = app.get_webview_window("main") {
@@ -122,6 +134,7 @@ pub fn run() {
             commands::mcp_info,
             commands::import_app,
             commands::export_app,
+            commands::show_main_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

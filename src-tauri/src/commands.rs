@@ -180,6 +180,22 @@ pub async fn import_app(state: State<'_, Arc<AppState>>, path: String) -> Result
     Ok(cfg)
 }
 
+/// Bring the main window to the front (from the tray panel), optionally selecting
+/// an app there.
+#[tauri::command]
+pub fn show_main_window(app: tauri::AppHandle, select: Option<String>) -> Result<(), String> {
+    use tauri::{Emitter, Manager};
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+    if let Some(name) = select {
+        let _ = app.emit("harbor://select", name);
+    }
+    Ok(())
+}
+
 /// Export a registered app to `<root>/harbor.json` so the config is committable
 /// and shareable. Returns the written path.
 #[tauri::command]
