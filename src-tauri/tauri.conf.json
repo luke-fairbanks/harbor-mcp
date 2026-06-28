@@ -37,7 +37,13 @@
     "targets": ["app", "dmg"],
     "category": "DeveloperTool",
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "dmg": {
+        "background": "dmg-background.png",
+        "windowSize": { "width": 600, "height": 400 },
+        "appPosition": { "x": 150, "y": 185 },
+        "applicationFolderPosition": { "x": 450, "y": 185 }
+      }
     },
     "icon": [
       "icons/32x32.png",

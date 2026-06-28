@@ -85,5 +85,11 @@ The server binds `127.0.0.1` only and requires a per-install bearer token.
 
 ## Status
 
-MVP (M0–M3) complete and verified end-to-end on QuizletLocal. Next: config-editor
-UI, richer `detect_app`, `harbor.json` import/export, code signing + notarization.
+MVP (M0–M3) plus M4/M5 polish — complete and verified end-to-end on QuizletLocal.
+The UI is a native macOS app: vibrancy sidebar, overlay titlebar, SF typography,
+auto light/dark. Includes a config editor (services/env/ports/health/deps/
+profiles), confirmation dialogs, a native folder picker, `harbor.json`
+import/export, and a custom app icon + `.dmg`.
+
+The `.app`/`.dmg` are **unsigned** — first launch is right-click → Open (Gatekeeper).
+Code signing + notarization is the remaining step for wide distribution.
