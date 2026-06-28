@@ -88,7 +88,6 @@ impl Store {
 
 /// Read a per-project `harbor.json` into an [`AppConfig`]. The file may omit
 /// `root`; the caller supplies the directory it was read from.
-#[allow(dead_code)] // wired to import/export commands in M4
 pub fn import_harbor_json(path: &Path, default_root: &Path) -> Result<AppConfig> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -101,7 +100,6 @@ pub fn import_harbor_json(path: &Path, default_root: &Path) -> Result<AppConfig>
 }
 
 /// Write an [`AppConfig`] back out as a shareable `harbor.json`.
-#[allow(dead_code)] // wired to import/export commands in M4
 pub fn export_harbor_json(cfg: &AppConfig, path: &Path) -> Result<()> {
     let text = serde_json::to_string_pretty(cfg)?;
     std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;

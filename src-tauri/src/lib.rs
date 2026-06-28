@@ -34,6 +34,7 @@ fn new_token() -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -95,6 +96,12 @@ pub fn run() {
                 }
             });
 
+            // Window is created hidden (config `visible: false`) to avoid the
+            // transparent-window white flash; reveal once setup is done.
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -111,6 +118,8 @@ pub fn run() {
             commands::detect_app,
             commands::open_app,
             commands::mcp_info,
+            commands::import_app,
+            commands::export_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

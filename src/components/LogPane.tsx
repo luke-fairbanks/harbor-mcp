@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Flex, SegmentedControl, Text } from "@radix-ui/themes";
+import { SegmentedControl } from "@radix-ui/themes";
 import type { LogLine } from "../types";
 
 export function LogPane({
@@ -11,38 +11,38 @@ export function LogPane({
 }) {
   const [filter, setFilter] = useState<string>("all");
   const ref = useRef<HTMLDivElement>(null);
-  const stickRef = useRef(true);
+  const stick = useRef(true);
 
   const shown = useMemo(
     () => (filter === "all" ? logs : logs.filter((l) => l.service === filter)),
     [logs, filter],
   );
 
-  // Auto-scroll to bottom unless the user scrolled up.
   useEffect(() => {
     const el = ref.current;
-    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [shown]);
 
   const onScroll = () => {
     const el = ref.current;
     if (!el) return;
-    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
   };
 
+  const multi = services.length > 1;
+
   return (
-    <Flex direction="column" gap="2" className="fill">
-      <Flex align="center" justify="between">
-        <Text size="1" color="gray" weight="medium">
-          LOGS
-        </Text>
-        {services.length > 1 && (
+    <div className="log-wrap">
+      <div className="row">
+        <span className="section-label">Logs</span>
+        <span className="spacer" />
+        {multi && (
           <SegmentedControl.Root
             size="1"
             value={filter}
-            onValueChange={setFilter}
+            onValueChange={(v) => v && setFilter(v)}
           >
-            <SegmentedControl.Item value="all">all</SegmentedControl.Item>
+            <SegmentedControl.Item value="all">All</SegmentedControl.Item>
             {services.map((s) => (
               <SegmentedControl.Item key={s} value={s}>
                 {s}
@@ -50,23 +50,19 @@ export function LogPane({
             ))}
           </SegmentedControl.Root>
         )}
-      </Flex>
+      </div>
       <div className="log-pane" ref={ref} onScroll={onScroll}>
         {shown.length === 0 ? (
-          <Text size="1" color="gray">
-            No output yet.
-          </Text>
+          <div className="log-empty">No output yet.</div>
         ) : (
           shown.map((l) => (
             <div className="log-line" data-stream={l.stream} key={l.seq}>
-              {filter === "all" && services.length > 1 && (
-                <span className="svc">{l.service}</span>
-              )}
-              <span>{l.line || " "}</span>
+              {filter === "all" && multi && <span className="svc">{l.service}</span>}
+              <span>{l.line || " "}</span>
             </div>
           ))
         )}
       </div>
-    </Flex>
+    </div>
   );
 }

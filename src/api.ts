@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AppConfig,
   AppListItem,
@@ -29,7 +30,15 @@ export const api = {
   detectApp: (path: string) => invoke<Detection>("detect_app", { path }),
   openApp: (app: string) => invoke<string>("open_app", { app }),
   mcpInfo: () => invoke<McpInfo>("mcp_info"),
+  importApp: (path: string) => invoke<AppConfig>("import_app", { path }),
+  exportApp: (app: string) => invoke<string>("export_app", { app }),
 };
+
+/** Native macOS folder picker; returns the chosen directory or null. */
+export async function pickFolder(title?: string): Promise<string | null> {
+  const res = await open({ directory: true, multiple: false, title });
+  return typeof res === "string" ? res : null;
+}
 
 export const LOG_EVENT = "harbor://log";
 export const STATUS_EVENT = "harbor://status";

@@ -1,20 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  Box,
-  Button,
-  Flex,
-  Heading,
-  IconButton,
-  Text,
-  Tooltip,
-} from "@radix-ui/themes";
+import { Tooltip } from "@radix-ui/themes";
 import { GearIcon, PlusIcon } from "@radix-ui/react-icons";
+import { motion } from "framer-motion";
 import { api, onLog, onStatus } from "./api";
 import type { AppListItem, AppRunSnapshot, LogLine } from "./types";
 import { StatusDot, aggregateStatus } from "./components/StatusDot";
 import { AppDetail } from "./components/AppDetail";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { RegisterDialog } from "./components/RegisterDialog";
+import { AnchorMark } from "./components/icons";
 
 const LOG_CAP = 4000;
 
@@ -34,7 +28,11 @@ export default function App() {
       for (const it of list) if (it.run) next[it.config.name] = it.run;
       return next;
     });
-    setSelected((cur) => cur ?? list[0]?.config.name ?? null);
+    setSelected((cur) =>
+      cur && list.some((i) => i.config.name === cur)
+        ? cur
+        : list[0]?.config.name ?? null,
+    );
   }, []);
 
   const refreshApp = useCallback(async (app: string) => {
@@ -49,7 +47,6 @@ export default function App() {
     refreshList();
   }, [refreshList]);
 
-  // Live log + status streams from the supervisor.
   useEffect(() => {
     let cancelled = false;
     let offLog: (() => void) | undefined;
@@ -63,9 +60,9 @@ export default function App() {
       });
     }).then((u) => (cancelled ? u() : (offLog = u)));
 
-    onStatus((s) => {
-      refreshApp(s.app);
-    }).then((u) => (cancelled ? u() : (offStatus = u)));
+    onStatus((s) => refreshApp(s.app)).then((u) =>
+      cancelled ? u() : (offStatus = u),
+    );
 
     return () => {
       cancelled = true;
@@ -77,73 +74,76 @@ export default function App() {
   const selectedItem = items.find((i) => i.config.name === selected) ?? null;
 
   return (
-    <Box className="harbor-shell">
-      {/* Sidebar */}
-      <Box className="harbor-sidebar">
-        <Flex align="center" justify="between" px="3" py="3">
-          <Heading size="4" style={{ letterSpacing: "-0.02em" }}>
-            ⚓ Harbor
-          </Heading>
-          <Tooltip content="Register an app">
-            <IconButton
-              variant="soft"
-              size="1"
-              onClick={() => setRegisterOpen(true)}
-            >
-              <PlusIcon />
-            </IconButton>
-          </Tooltip>
-        </Flex>
+    <div className="harbor-shell">
+      <div className="drag-strip" data-tauri-drag-region />
 
-        <Box className="harbor-applist">
+      <aside className="harbor-sidebar">
+        <div className="sidebar-head">
+          <span className="sidebar-brand">
+            <span style={{ color: "var(--accent)", display: "inline-flex" }}>
+              <AnchorMark size={17} />
+            </span>
+            Harbor
+          </span>
+          <Tooltip content="Register an app">
+            <button className="icon-btn" onClick={() => setRegisterOpen(true)}>
+              <PlusIcon />
+            </button>
+          </Tooltip>
+        </div>
+
+        <div className="sidebar-section">Apps</div>
+        <div className="applist">
           {items.length === 0 && (
-            <Text size="1" color="gray" as="p" style={{ padding: "8px 16px" }}>
-              No apps yet. Click + to register one.
-            </Text>
+            <div
+              className="app-meta"
+              style={{ padding: "6px 10px", lineHeight: 1.5 }}
+            >
+              No apps yet. Click + to register a project folder.
+            </div>
           )}
           {items.map((it) => {
-            const run = live[it.config.name];
-            const status = aggregateStatus(run);
+            const name = it.config.name;
+            const status = aggregateStatus(live[name]);
+            const isSel = view === "app" && selected === name;
             return (
               <div
-                key={it.config.name}
-                className="harbor-app-item"
-                data-selected={view === "app" && selected === it.config.name}
+                key={name}
+                className="app-item"
                 onClick={() => {
-                  setSelected(it.config.name);
+                  setSelected(name);
                   setView("app");
                 }}
               >
+                {isSel && (
+                  <motion.div
+                    layoutId="app-sel"
+                    className="app-sel"
+                    transition={{ type: "spring", stiffness: 520, damping: 42 }}
+                  />
+                )}
                 <StatusDot status={status} />
-                <Box style={{ minWidth: 0, flex: 1 }}>
-                  <Text size="2" weight="medium" truncate as="div">
-                    {it.config.name}
-                  </Text>
-                </Box>
+                <span className="app-name">{name}</span>
                 {status !== "stopped" && (
-                  <Text size="1" color="gray">
-                    {status}
-                  </Text>
+                  <span className="app-meta">{status}</span>
                 )}
               </div>
             );
           })}
-        </Box>
+        </div>
 
-        <Box px="2" py="2">
-          <Button
-            variant={view === "settings" ? "soft" : "ghost"}
-            color="gray"
-            style={{ width: "100%", justifyContent: "flex-start" }}
+        <div className="sidebar-foot">
+          <button
+            className="foot-btn"
+            data-active={view === "settings"}
             onClick={() => setView("settings")}
           >
             <GearIcon /> Connect your Claude
-          </Button>
-        </Box>
-      </Box>
+          </button>
+        </div>
+      </aside>
 
-      {/* Detail */}
-      <Box className="harbor-detail">
+      <main className="harbor-detail">
         {view === "settings" ? (
           <SettingsPanel />
         ) : selectedItem ? (
@@ -162,11 +162,12 @@ export default function App() {
             }}
           />
         ) : (
-          <Flex align="center" justify="center" className="fill">
-            <Text color="gray">Select an app, or click + to register one.</Text>
-          </Flex>
+          <div className="empty-state">
+            <AnchorMark size={26} />
+            <div>Select an app, or click + to register one.</div>
+          </div>
         )}
-      </Box>
+      </main>
 
       <RegisterDialog
         open={registerOpen}
@@ -177,6 +178,6 @@ export default function App() {
           refreshList();
         }}
       />
-    </Box>
+    </div>
   );
 }

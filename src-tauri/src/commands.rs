@@ -6,10 +6,11 @@
 
 use crate::detect::{self, Detection};
 use crate::model::{AppConfig, AppRunSnapshot, LogLine};
-use crate::ops;
 use crate::state::AppState;
+use crate::{ops, store};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
 
@@ -158,6 +159,38 @@ pub async fn open_app(state: State<'_, Arc<AppState>>, app: String) -> Result<St
 #[tauri::command]
 pub async fn mcp_info(state: State<'_, Arc<AppState>>) -> Result<McpInfo, String> {
     Ok(build_mcp_info(&state.mcp.token, state.mcp.port))
+}
+
+/// Import a shareable `harbor.json`. `path` may be the file itself or the folder
+/// containing it; the app is registered under its `name`.
+#[tauri::command]
+pub async fn import_app(state: State<'_, Arc<AppState>>, path: String) -> Result<AppConfig, String> {
+    let p = PathBuf::from(&path);
+    let (file, root) = if p.is_dir() {
+        (p.join("harbor.json"), p.clone())
+    } else {
+        let root = p.parent().map(|x| x.to_path_buf()).unwrap_or_else(|| p.clone());
+        (p.clone(), root)
+    };
+    if !file.exists() {
+        return Err(format!("no harbor.json at {}", file.display()));
+    }
+    let cfg = store::import_harbor_json(&file, &root).map_err(|e| e.to_string())?;
+    state.upsert(cfg.clone()).await.map_err(|e| e.to_string())?;
+    Ok(cfg)
+}
+
+/// Export a registered app to `<root>/harbor.json` so the config is committable
+/// and shareable. Returns the written path.
+#[tauri::command]
+pub async fn export_app(state: State<'_, Arc<AppState>>, app: String) -> Result<String, String> {
+    let cfg = state
+        .get_config(&app)
+        .await
+        .ok_or_else(|| format!("no such app: {app}"))?;
+    let path = PathBuf::from(&cfg.root).join("harbor.json");
+    store::export_harbor_json(&cfg, &path).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 pub fn build_mcp_info(token: &str, port: u16) -> McpInfo {

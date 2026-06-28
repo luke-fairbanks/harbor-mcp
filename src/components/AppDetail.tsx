@@ -1,28 +1,20 @@
 import { useMemo, useState } from "react";
-import {
-  Badge,
-  Box,
-  Button,
-  Card,
-  Code,
-  Flex,
-  Heading,
-  IconButton,
-  Select,
-  Separator,
-  Text,
-  Tooltip,
-} from "@radix-ui/themes";
+import { Button, Code, Select, Tooltip } from "@radix-ui/themes";
 import {
   ExternalLinkIcon,
+  Pencil1Icon,
   PlayIcon,
+  Share1Icon,
   StopIcon,
   TrashIcon,
 } from "@radix-ui/react-icons";
+import { AnimatePresence, motion } from "framer-motion";
 import type { AppListItem, AppRunSnapshot, LogLine, ServiceRun } from "../types";
 import { api } from "../api";
-import { STATUS_BADGE } from "./StatusDot";
+import { StatusBadge, StatusDot } from "./StatusDot";
 import { LogPane } from "./LogPane";
+import { ConfigEditor } from "./ConfigEditor";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 export function AppDetail({
   item,
@@ -44,6 +36,10 @@ export function AppDetail({
   );
   const [busy, setBusy] = useState<null | "start" | "stop">(null);
   const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [confirmStop, setConfirmStop] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
 
   const running = run?.running ?? false;
   const runByName = useMemo(() => {
@@ -70,20 +66,27 @@ export function AppDetail({
     }
   }
 
+  async function doExport() {
+    try {
+      const p = await api.exportApp(cfg.name);
+      setNote(`Exported → ${p}`);
+      setTimeout(() => setNote(null), 3500);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   return (
-    <Flex direction="column" className="fill" p="4" gap="3">
-      {/* Header */}
-      <Flex align="center" justify="between" gap="3">
-        <Box>
-          <Heading size="5">{cfg.name}</Heading>
-          <Text size="1" color="gray" className="mono">
-            {cfg.root}
-          </Text>
-        </Box>
-        <Flex align="center" gap="2">
+    <>
+      <div className="detail-head">
+        <div style={{ minWidth: 0 }}>
+          <div className="detail-title">{cfg.name}</div>
+          <div className="detail-sub">{cfg.root}</div>
+        </div>
+        <div className="row" style={{ flex: "none" }}>
           {!running && profiles.length > 1 && (
             <Select.Root value={profile} onValueChange={setProfile} size="2">
-              <Select.Trigger />
+              <Select.Trigger variant="surface" />
               <Select.Content>
                 {profiles.map((p) => (
                   <Select.Item key={p} value={p}>
@@ -93,119 +96,189 @@ export function AppDetail({
               </Select.Content>
             </Select.Root>
           )}
-          {running ? (
-            <Button
-              color="tomato"
-              variant="solid"
-              disabled={busy !== null}
-              onClick={() => act("stop", () => api.stopApp(cfg.name))}
-            >
-              <StopIcon /> {busy === "stop" ? "Stopping…" : "Stop"}
-            </Button>
-          ) : (
-            <Button
-              disabled={busy !== null}
-              onClick={() => act("start", () => api.startApp(cfg.name, profile))}
-            >
-              <PlayIcon /> {busy === "start" ? "Starting…" : "Start"}
-            </Button>
-          )}
+
+          <AnimatePresence mode="wait" initial={false}>
+            {running ? (
+              <motion.div
+                key="stop"
+                initial={{ opacity: 0, scale: 0.96 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.96 }}
+                transition={{ duration: 0.13 }}
+              >
+                <Button
+                  color="red"
+                  variant="solid"
+                  disabled={busy !== null}
+                  onClick={() => setConfirmStop(true)}
+                >
+                  <StopIcon /> {busy === "stop" ? "Stopping…" : "Stop"}
+                </Button>
+              </motion.div>
+            ) : (
+              <motion.div
+                key="start"
+                initial={{ opacity: 0, scale: 0.96 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.96 }}
+                transition={{ duration: 0.13 }}
+              >
+                <Button
+                  disabled={busy !== null}
+                  onClick={() => act("start", () => api.startApp(cfg.name, profile))}
+                >
+                  <PlayIcon /> {busy === "start" ? "Starting…" : "Start"}
+                </Button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           <Tooltip content="Open in browser">
-            <IconButton
-              variant="soft"
+            <button
+              className="icon-btn"
               disabled={!running}
               onClick={() => api.openApp(cfg.name)}
             >
               <ExternalLinkIcon />
-            </IconButton>
+            </button>
+          </Tooltip>
+          <Tooltip content="Edit config">
+            <button
+              className="icon-btn"
+              disabled={running}
+              onClick={() => setEditing(true)}
+            >
+              <Pencil1Icon />
+            </button>
+          </Tooltip>
+          <Tooltip content="Export harbor.json">
+            <button className="icon-btn" onClick={doExport}>
+              <Share1Icon />
+            </button>
           </Tooltip>
           <Tooltip content={running ? "Stop before removing" : "Remove app"}>
-            <IconButton
-              variant="soft"
-              color="gray"
+            <button
+              className="icon-btn"
               disabled={running}
-              onClick={async () => {
-                await api.removeApp(cfg.name);
-                onRemoved();
-              }}
+              onClick={() => setConfirmRemove(true)}
             >
               <TrashIcon />
-            </IconButton>
+            </button>
           </Tooltip>
-        </Flex>
-      </Flex>
+        </div>
+      </div>
 
-      {error && (
-        <Text size="1" color="tomato" className="mono">
-          {error}
-        </Text>
-      )}
+      <div className="detail-body">
+        {(error || note) && (
+          <div
+            className="mono"
+            style={{
+              fontSize: 12,
+              color: error ? "var(--danger)" : "var(--text-2)",
+            }}
+          >
+            {error ?? note}
+          </div>
+        )}
 
-      {/* Port plan */}
-      {run && run.portPlan.length > 0 && (
-        <Flex gap="2" wrap="wrap" align="center">
-          <Text size="1" color="gray" weight="medium">
-            PORT PLAN
-          </Text>
-          {run.portPlan.map((p) => (
-            <Badge key={p.service} variant="soft" color={p.note ? "amber" : "cyan"}>
-              {p.service} → {p.resolved}
-              {p.note ? ` (${p.note})` : ""}
-            </Badge>
-          ))}
-        </Flex>
-      )}
+        {run && run.portPlan.length > 0 && (
+          <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+            <span className="section-label">Port plan</span>
+            {run.portPlan.map((p) => (
+              <span
+                key={p.service}
+                className="chip"
+                data-tone={p.note ? "warn" : "accent"}
+              >
+                {p.service} → {p.resolved}
+                {p.note ? ` · ${p.note}` : ""}
+              </span>
+            ))}
+          </div>
+        )}
 
-      <Separator size="4" />
-
-      {/* Service cards */}
-      <Flex gap="2" wrap="wrap">
-        {activeServices.map((name) => {
-          const sc = cfg.services.find((s) => s.name === name);
-          const sr = runByName[name];
-          const status = sr?.status ?? "stopped";
-          return (
-            <Card key={name} style={{ minWidth: 240, flex: "1 1 240px" }}>
-              <Flex direction="column" gap="1">
-                <Flex align="center" justify="between">
-                  <Text weight="bold">{name}</Text>
-                  <Badge color={STATUS_BADGE[status]} variant="soft">
-                    {status}
-                  </Badge>
-                </Flex>
-                <Code size="1" variant="ghost" color="gray">
+        <div className="svc-grid">
+          {activeServices.map((name) => {
+            const sc = cfg.services.find((s) => s.name === name);
+            const sr = runByName[name];
+            const status = sr?.status ?? "stopped";
+            return (
+              <motion.div
+                className="svc-card"
+                key={name}
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.18 }}
+              >
+                <div className="svc-card-top">
+                  <span className="svc-name">
+                    <StatusDot status={status} />
+                    {name}
+                  </span>
+                  <StatusBadge status={status} />
+                </div>
+                <div className="svc-cmd">
                   {sr?.resolvedCommand ?? sc?.command ?? ""}
-                </Code>
-                <Flex gap="3" mt="1">
+                </div>
+                <div className="svc-meta">
                   {sr?.port != null && (
-                    <Text size="1" color="gray">
+                    <span>
                       port <b>{sr.port}</b>
-                    </Text>
+                    </span>
                   )}
-                  {sr?.pid != null && (
-                    <Text size="1" color="gray">
-                      pid {sr.pid}
-                    </Text>
-                  )}
+                  {sr?.pid != null && <span>pid {sr.pid}</span>}
                   {sc?.dependsOn && sc.dependsOn.length > 0 && (
-                    <Text size="1" color="gray">
-                      ↳ {sc.dependsOn.join(", ")}
-                    </Text>
+                    <span>↳ {sc.dependsOn.join(", ")}</span>
                   )}
                   {sr?.exitCode != null && (
-                    <Text size="1" color="tomato">
+                    <span style={{ color: "var(--danger)" }}>
                       exit {sr.exitCode}
-                    </Text>
+                    </span>
                   )}
-                </Flex>
-              </Flex>
-            </Card>
-          );
-        })}
-      </Flex>
+                </div>
+              </motion.div>
+            );
+          })}
+        </div>
 
-      {/* Logs */}
-      <LogPane logs={logs} services={activeServices} />
-    </Flex>
+        <LogPane logs={logs} services={activeServices} />
+      </div>
+
+      {editing && (
+        <ConfigEditor
+          open
+          onOpenChange={(v) => !v && setEditing(false)}
+          app={cfg}
+          onSaved={onChanged}
+        />
+      )}
+
+      <ConfirmDialog
+        open={confirmStop}
+        onOpenChange={setConfirmStop}
+        title={`Stop ${cfg.name}?`}
+        body={
+          <>
+            This sends <Code>SIGTERM</Code> then <Code>SIGKILL</Code> to the whole
+            process tree.
+          </>
+        }
+        confirmLabel="Stop"
+        danger
+        onConfirm={() => act("stop", () => api.stopApp(cfg.name))}
+      />
+      <ConfirmDialog
+        open={confirmRemove}
+        onOpenChange={setConfirmRemove}
+        title={`Remove ${cfg.name}?`}
+        body="This removes it from Harbor's registry. Your project's files are not touched."
+        confirmLabel="Remove"
+        danger
+        onConfirm={async () => {
+          await api.removeApp(cfg.name);
+          onRemoved();
+        }}
+      />
+    </>
   );
 }
