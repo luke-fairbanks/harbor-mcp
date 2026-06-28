@@ -51,12 +51,19 @@ pub fn detect(path: &Path) -> Detection {
         }
 
         let has_script = |k: &str| scripts.map(|s| s.contains_key(k)).unwrap_or(false);
+        let is_frontend = matches!(
+            framework,
+            Some(("next", _)) | Some(("vite", _)) | Some(("remix", _))
+        );
 
-        // A `dev` script usually means the frontend/dev server.
+        // A `dev` script is the runnable local entry point for a frontend
+        // framework — and the right default. (`npm start` / `next start` would
+        // need a production `npm run build` first, which trips people up.)
         if has_script("dev") {
             let (port, ready) = match framework {
                 Some(("vite", p)) => (p, Some("ready in")),
-                Some(("next", p)) => (p, Some("started server")),
+                Some(("next", p)) => (p, Some("Local:")),
+                Some(("remix", p)) => (p, Some("Local:")),
                 Some((_, p)) => (p, None),
                 None => (3000, None),
             };
@@ -70,15 +77,16 @@ pub fn detect(path: &Path) -> Detection {
                 health_check: Some(HealthCheck::Tcp),
                 ready_log_pattern: ready.map(|s| s.to_string()),
             });
-            notes.push(format!("`npm run dev` → web service (guess port {port})"));
+            notes.push(format!("`npm run dev` → web service (port {port})"));
         }
 
-        // A `start` script (or a bare entry file) means a long-running server.
-        if has_script("start") {
-            // A backend server gets its own port — not the frontend framework's
-            // dev port (vite 5173 etc.), which belongs to the `web` service.
+        // Only treat `npm start` as a runnable service when it's a plain backend
+        // (no dev server) — for a frontend framework it needs a build first, so
+        // we keep the default to `npm run dev`.
+        let start_runnable = has_script("start") && !(is_frontend && has_script("dev"));
+        if start_runnable {
             let server_port = match framework {
-                Some(("node-server", p)) | Some(("next", p)) | Some(("remix", p)) => p,
+                Some(("node-server", p)) => p,
                 _ => 3000,
             };
             services.push(ServiceConfig {
@@ -95,24 +103,30 @@ pub fn detect(path: &Path) -> Detection {
                 ready_log_pattern: None,
             });
             notes.push("`npm start` → server service".to_string());
-        } else if let Some(entry) = ["server.js", "index.js", "app.js", "main.js"]
-            .iter()
-            .find(|f| path.join(f).exists())
-        {
-            services.push(ServiceConfig {
-                name: "server".to_string(),
-                cwd: ".".to_string(),
-                command: format!("node {entry}"),
-                port: Some(3000),
-                env: port_env(),
-                depends_on: vec![],
-                health_check: Some(HealthCheck::Http {
-                    path: "/".to_string(),
-                    expect: Some("2xx-3xx".to_string()),
-                }),
-                ready_log_pattern: None,
-            });
-            notes.push(format!("entry file `{entry}` → server service"));
+        } else if has_script("start") && is_frontend {
+            notes.push(
+                "`npm start` needs `npm run build` first — defaulting to `npm run dev`".to_string(),
+            );
+        } else if !has_script("start") && !has_script("dev") {
+            if let Some(entry) = ["server.js", "index.js", "app.js", "main.js"]
+                .iter()
+                .find(|f| path.join(f).exists())
+            {
+                services.push(ServiceConfig {
+                    name: "server".to_string(),
+                    cwd: ".".to_string(),
+                    command: format!("node {entry}"),
+                    port: Some(3000),
+                    env: port_env(),
+                    depends_on: vec![],
+                    health_check: Some(HealthCheck::Http {
+                        path: "/".to_string(),
+                        expect: Some("2xx-3xx".to_string()),
+                    }),
+                    ready_log_pattern: None,
+                });
+                notes.push(format!("entry file `{entry}` → server service"));
+            }
         }
     }
 
@@ -161,19 +175,16 @@ pub fn detect(path: &Path) -> Detection {
     // ---- profiles --------------------------------------------------------
     let mut profiles: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let names: Vec<String> = services.iter().map(|s| s.name.clone()).collect();
-    if names.iter().any(|n| n == "server") {
+    // Prefer the dev/web server as the default — it runs without a build step.
+    if names.iter().any(|n| n == "web") {
+        profiles.insert("default".to_string(), vec!["web".to_string()]);
+    } else if names.iter().any(|n| n == "server") {
         profiles.insert("default".to_string(), vec!["server".to_string()]);
     } else if let Some(first) = names.first() {
         profiles.insert("default".to_string(), vec![first.clone()]);
     }
     if names.len() > 1 {
         profiles.insert("dev".to_string(), names.clone());
-        // If both web and server exist, wire web → server ordering in the proposal.
-        if names.iter().any(|n| n == "web") && names.iter().any(|n| n == "server") {
-            if let Some(web) = services.iter_mut().find(|s| s.name == "web") {
-                web.depends_on = vec!["server".to_string()];
-            }
-        }
     }
 
     Detection {

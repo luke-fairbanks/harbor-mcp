@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { Tooltip } from "@radix-ui/themes";
-import { GearIcon, PlusIcon } from "@radix-ui/react-icons";
+import { CheckCircledIcon, GearIcon, PlusIcon } from "@radix-ui/react-icons";
 import { motion } from "framer-motion";
 import { api, onLog, onSelect, onStatus } from "./api";
-import type { AppListItem, AppRunSnapshot, LogLine } from "./types";
+import type { AgentStatus, AppListItem, AppRunSnapshot, LogLine } from "./types";
 import { StatusDot, aggregateStatus } from "./components/StatusDot";
 import { AppDetail } from "./components/AppDetail";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -20,6 +20,15 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [view, setView] = useState<"app" | "settings">("app");
   const [registerOpen, setRegisterOpen] = useState(false);
+  const [agents, setAgents] = useState<AgentStatus | null>(null);
+
+  const refreshAgents = useCallback(async () => {
+    try {
+      setAgents(await api.agentsStatus());
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   const refreshList = useCallback(async () => {
     const list = await api.listApps();
@@ -46,7 +55,8 @@ export default function App() {
 
   useEffect(() => {
     refreshList();
-  }, [refreshList]);
+    refreshAgents();
+  }, [refreshList, refreshAgents]);
 
   useEffect(() => {
     let cancelled = false;
@@ -81,6 +91,16 @@ export default function App() {
   }, [refreshApp]);
 
   const selectedItem = items.find((i) => i.config.name === selected) ?? null;
+
+  const claudeOn = !!(agents?.codeConnected || agents?.desktopConnected);
+  const codexOn = !!agents?.codexConnected;
+  const connectedNames = [claudeOn ? "Claude" : null, codexOn ? "Codex" : null].filter(
+    Boolean,
+  ) as string[];
+  const agentsConnected = connectedNames.length > 0;
+  const footLabel = agentsConnected
+    ? `Connected to ${connectedNames.join(" & ")}`
+    : "Connect your Claude";
 
   return (
     <div className="harbor-shell">
@@ -145,16 +165,17 @@ export default function App() {
           <button
             className="foot-btn"
             data-active={view === "settings"}
+            data-connected={agentsConnected}
             onClick={() => setView("settings")}
           >
-            <GearIcon /> Connect your Claude
+            {agentsConnected ? <CheckCircledIcon /> : <GearIcon />} {footLabel}
           </button>
         </div>
       </aside>
 
       <main className="harbor-detail">
         {view === "settings" ? (
-          <SettingsPanel />
+          <SettingsPanel onAgentsChanged={refreshAgents} />
         ) : selectedItem ? (
           <AppDetail
             key={selectedItem.config.name}

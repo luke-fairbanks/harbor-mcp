@@ -136,9 +136,12 @@ pub fn run() {
             commands::import_app,
             commands::export_app,
             commands::show_main_window,
-            commands::claude_status,
+            commands::agents_status,
             commands::connect_claude_code,
             commands::connect_claude_desktop,
+            commands::connect_codex,
+            commands::fix_prompt,
+            commands::run_fix,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

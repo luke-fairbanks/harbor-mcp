@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
-import { Button, Code, Select, Tooltip } from "@radix-ui/themes";
+import { Button, Code, Dialog, Flex, Select, Spinner, Tooltip } from "@radix-ui/themes";
 import {
+  CopyIcon,
   ExternalLinkIcon,
+  MagicWandIcon,
   Pencil1Icon,
   PlayIcon,
   Share1Icon,
@@ -41,6 +43,11 @@ export function AppDetail({
   const [editing, setEditing] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [fixOpen, setFixOpen] = useState(false);
+  const [fixBusy, setFixBusy] = useState(false);
+  const [fixResult, setFixResult] = useState<
+    { agent?: string; text: string; copied?: boolean } | null
+  >(null);
 
   const running = run?.running ?? false;
   const runByName = useMemo(() => {
@@ -77,6 +84,35 @@ export function AppDetail({
     }
   }
 
+  function lastErrorLine(service: string): string | null {
+    const svc = logs.filter((l) => l.service === service && l.line.trim());
+    const errs = svc.filter((l) => l.stream === "stderr");
+    const pick = (errs.length ? errs : svc).slice(-1)[0];
+    return pick?.line ?? null;
+  }
+
+  async function fixWithAI(service: string) {
+    setFixOpen(true);
+    setFixBusy(true);
+    setFixResult(null);
+    try {
+      const r = await api.runFix(cfg.name, service);
+      setFixResult({ agent: r.agent, text: r.response });
+    } catch {
+      // No agent CLI found — copy a ready-to-paste prompt instead.
+      let prompt = "";
+      try {
+        prompt = await api.fixPrompt(cfg.name, service);
+        await navigator.clipboard.writeText(prompt);
+      } catch {
+        /* ignore */
+      }
+      setFixResult({ text: prompt, copied: true });
+    } finally {
+      setFixBusy(false);
+    }
+  }
+
   return (
     <>
       <div className="detail-head" onMouseDown={startWindowDrag}>
@@ -104,34 +140,35 @@ export function AppDetail({
             {running ? (
               <motion.div
                 key="stop"
-                initial={{ opacity: 0, scale: 0.96 }}
+                initial={{ opacity: 0, scale: 0.97 }}
                 animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.96 }}
-                transition={{ duration: 0.13 }}
+                exit={{ opacity: 0, scale: 0.97 }}
+                transition={{ duration: 0.12 }}
               >
-                <Button
-                  color="red"
-                  variant="solid"
+                <button
+                  className="run-btn"
+                  data-kind="stop"
                   disabled={busy !== null}
                   onClick={() => setConfirmStop(true)}
                 >
                   <StopIcon /> {busy === "stop" ? "Stopping…" : "Stop"}
-                </Button>
+                </button>
               </motion.div>
             ) : (
               <motion.div
                 key="start"
-                initial={{ opacity: 0, scale: 0.96 }}
+                initial={{ opacity: 0, scale: 0.97 }}
                 animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.96 }}
-                transition={{ duration: 0.13 }}
+                exit={{ opacity: 0, scale: 0.97 }}
+                transition={{ duration: 0.12 }}
               >
-                <Button
+                <button
+                  className="run-btn"
                   disabled={busy !== null}
                   onClick={() => act("start", () => api.startApp(cfg.name, profile))}
                 >
                   <PlayIcon /> {busy === "start" ? "Starting…" : "Start"}
-                </Button>
+                </button>
               </motion.div>
             )}
           </AnimatePresence>
@@ -205,10 +242,15 @@ export function AppDetail({
             const sc = cfg.services.find((s) => s.name === name);
             const sr = runByName[name];
             const status = sr?.status ?? "stopped";
+            const errored =
+              (status === "exited" && sr?.exitCode != null && sr.exitCode !== 0) ||
+              status === "unhealthy";
+            const errLine = errored ? lastErrorLine(name) : null;
             return (
               <motion.div
                 className="svc-card"
                 key={name}
+                data-errored={errored}
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.18 }}
@@ -239,6 +281,23 @@ export function AppDetail({
                     </span>
                   )}
                 </div>
+                {errored && (
+                  <>
+                    {errLine && <div className="svc-error">{errLine}</div>}
+                    <div className="svc-actions">
+                      <button
+                        className="fix-btn"
+                        disabled={fixBusy}
+                        onClick={() => fixWithAI(name)}
+                      >
+                        <span className="accent">
+                          <MagicWandIcon />
+                        </span>{" "}
+                        Fix with AI
+                      </button>
+                    </div>
+                  </>
+                )}
               </motion.div>
             );
           })}
@@ -282,6 +341,52 @@ export function AppDetail({
           onRemoved();
         }}
       />
+
+      <Dialog.Root open={fixOpen} onOpenChange={setFixOpen}>
+        <Dialog.Content maxWidth="660px">
+          <Dialog.Title>
+            {fixBusy
+              ? "Diagnosing…"
+              : fixResult?.copied
+                ? "Fix prompt copied"
+                : `${fixResult?.agent ?? "AI"} suggests`}
+          </Dialog.Title>
+          {fixBusy ? (
+            <Flex align="center" gap="3" style={{ padding: "20px 4px", color: "var(--text-2)" }}>
+              <Spinner /> Asking your AI agent to diagnose the error…
+            </Flex>
+          ) : fixResult ? (
+            <>
+              {fixResult.copied && (
+                <Dialog.Description size="2" color="gray" mb="2">
+                  No Claude or Codex CLI was found locally. A tailored prompt was
+                  copied to your clipboard — paste it into Claude or Codex (with
+                  Harbor connected, it can read the logs over MCP).
+                </Dialog.Description>
+              )}
+              <div className="fix-response">{fixResult.text}</div>
+              <Flex gap="3" mt="3" justify="end">
+                <Button
+                  variant="soft"
+                  color="gray"
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(fixResult.text);
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                >
+                  <CopyIcon /> Copy
+                </Button>
+                <Dialog.Close>
+                  <Button>Done</Button>
+                </Dialog.Close>
+              </Flex>
+            </>
+          ) : null}
+        </Dialog.Content>
+      </Dialog.Root>
     </>
   );
 }

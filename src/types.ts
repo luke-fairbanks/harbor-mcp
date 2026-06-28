@@ -92,9 +92,16 @@ export interface Detection {
   notes: string[];
 }
 
-export interface ClaudeStatus {
+export interface AgentStatus {
   codeCli: boolean;
   codeConnected: boolean;
   desktopInstalled: boolean;
   desktopConnected: boolean;
+  codexInstalled: boolean;
+  codexConnected: boolean;
+}
+
+export interface FixResult {
+  agent: string;
+  response: string;
 }

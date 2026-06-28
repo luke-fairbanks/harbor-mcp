@@ -50,6 +50,11 @@
   --panel-shadow: 0 12px 40px rgba(0, 0, 0, 0.16), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
   --accent-soft: color-mix(in srgb, var(--accent) 13%, transparent);
   --focus-ring: color-mix(in srgb, var(--accent) 50%, transparent);
+
+  --run: #1f9d4d;
+  --run-hover: #1a8a43;
+  --stop: #e0484d;
+  --stop-hover: #cf3d42;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -80,6 +85,11 @@
     --panel-shadow: 0 14px 44px rgba(0, 0, 0, 0.55), 0 0 0 0.5px rgba(255, 255, 255, 0.07);
     --accent-soft: color-mix(in srgb, var(--accent) 22%, transparent);
     --focus-ring: color-mix(in srgb, var(--accent) 60%, transparent);
+
+    --run: #2ea043;
+    --run-hover: #2c9740;
+    --stop: #e5484d;
+    --stop-hover: #d6383d;
   }
 }
 
@@ -729,4 +739,123 @@ body,
   font-size: 12.5px;
   text-align: center;
   line-height: 1.5;
+}
+
+/* ============================================================================
+   Run/Stop button, error surfacing, Fix-with-AI
+   ========================================================================== */
+.run-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  min-width: 80px;
+  padding: 0 14px;
+  border: none;
+  border-radius: var(--r-control);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: #fff;
+  cursor: default;
+  background: var(--run);
+  box-shadow:
+    0 1px 1.5px rgba(0, 0, 0, 0.18),
+    inset 0 0.5px 0 rgba(255, 255, 255, 0.22);
+  transition:
+    background-color 120ms var(--ease-out),
+    transform 70ms var(--ease-out),
+    filter 120ms var(--ease-out);
+}
+.run-btn:hover:not(:disabled) {
+  background: var(--run-hover);
+}
+.run-btn:active:not(:disabled) {
+  transform: translateY(0.5px);
+  filter: brightness(0.97);
+}
+.run-btn:disabled {
+  opacity: 0.5;
+}
+.run-btn[data-kind="stop"] {
+  background: var(--stop);
+}
+.run-btn[data-kind="stop"]:hover:not(:disabled) {
+  background: var(--stop-hover);
+}
+.run-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.svc-card[data-errored="true"] {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--danger) 42%, transparent),
+    var(--card-shadow);
+}
+.svc-error {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--danger);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 44px;
+  overflow: hidden;
+  user-select: text;
+}
+.svc-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+.fix-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 25px;
+  padding: 0 9px;
+  border-radius: 6px;
+  border: 0.5px solid var(--hair-2);
+  background: var(--elevated);
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 550;
+  cursor: default;
+  transition: background-color 120ms var(--ease-out);
+}
+.fix-btn:hover:not(:disabled) {
+  background: var(--sidebar-hover);
+}
+.fix-btn:disabled {
+  opacity: 0.55;
+}
+.fix-btn .accent {
+  color: var(--accent);
+  display: inline-flex;
+}
+
+.fix-response {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--inset);
+  border-radius: var(--r-control);
+  padding: 12px 13px;
+  max-height: 54vh;
+  overflow-y: auto;
+  user-select: text;
+  color: var(--text);
+}
+
+.foot-btn[data-connected="true"] {
+  color: var(--ok);
+}
+.foot-btn[data-connected="true"] svg {
+  color: var(--ok);
 }

@@ -31,4 +31,5 @@ nix = { version = "0.31", features = ["signal", "process"] }
 rmcp = { version = "1.8", features = ["server", "macros", "transport-streamable-http-server"] }
 schemars = "1"
 uuid = { version = "1", features = ["v4"] }
+toml_edit = "0.22"
 

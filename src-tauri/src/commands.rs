@@ -185,7 +185,7 @@ pub async fn import_app(state: State<'_, Arc<AppState>>, path: String) -> Result
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
-pub struct ClaudeStatus {
+pub struct AgentStatus {
     /// `claude` CLI is installed and found.
     #[serde(rename = "codeCli")]
     pub code_cli: bool,
@@ -198,6 +198,12 @@ pub struct ClaudeStatus {
     /// Harbor is present in claude_desktop_config.json.
     #[serde(rename = "desktopConnected")]
     pub desktop_connected: bool,
+    /// `codex` CLI found, or a ~/.codex config exists.
+    #[serde(rename = "codexInstalled")]
+    pub codex_installed: bool,
+    /// Harbor is present in ~/.codex/config.toml.
+    #[serde(rename = "codexConnected")]
+    pub codex_connected: bool,
 }
 
 fn claude_desktop_config_path() -> Option<PathBuf> {
@@ -205,9 +211,15 @@ fn claude_desktop_config_path() -> Option<PathBuf> {
     Some(PathBuf::from(home).join("Library/Application Support/Claude/claude_desktop_config.json"))
 }
 
+fn codex_config_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let base = std::env::var("CODEX_HOME").unwrap_or_else(|_| format!("{home}/.codex"));
+    Some(PathBuf::from(base).join("config.toml"))
+}
+
 #[tauri::command]
-pub async fn claude_status(state: State<'_, Arc<AppState>>) -> Result<ClaudeStatus, String> {
-    let _ = &state; // touched for symmetry; status doesn't need live state
+pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatus, String> {
+    let _ = &state; // status doesn't need live state
     let claude = crate::sysenv::resolve_bin("claude");
     let code_cli = claude.is_some();
     let mut code_connected = false;
@@ -239,11 +251,34 @@ pub async fn claude_status(state: State<'_, Arc<AppState>>) -> Result<ClaudeStat
         }
     }
 
-    Ok(ClaudeStatus {
+    // Codex
+    let codex_cli = crate::sysenv::resolve_bin("codex").is_some();
+    let cxp = codex_config_path();
+    let codex_installed = codex_cli
+        || cxp
+            .as_ref()
+            .map(|p| p.exists() || p.parent().map(|d| d.exists()).unwrap_or(false))
+            .unwrap_or(false);
+    let mut codex_connected = false;
+    if let Some(p) = &cxp {
+        if let Ok(text) = std::fs::read_to_string(p) {
+            if let Ok(doc) = text.parse::<toml_edit::DocumentMut>() {
+                codex_connected = doc
+                    .get("mcp_servers")
+                    .and_then(|t| t.as_table_like())
+                    .map(|t| t.contains_key("harbor"))
+                    .unwrap_or(false);
+            }
+        }
+    }
+
+    Ok(AgentStatus {
         code_cli,
         code_connected,
         desktop_installed,
         desktop_connected,
+        codex_installed,
+        codex_connected,
     })
 }
 
@@ -319,6 +354,161 @@ pub async fn connect_claude_desktop(state: State<'_, Arc<AppState>>) -> Result<S
     let text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
     std::fs::write(&p, text).map_err(|e| e.to_string())?;
     Ok("Added to Claude Desktop — restart it to use Harbor.".to_string())
+}
+
+#[tauri::command]
+pub async fn connect_codex(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let p = codex_config_path().ok_or("could not resolve ~/.codex/config.toml")?;
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let original = std::fs::read_to_string(&p).unwrap_or_default();
+    if !original.is_empty() {
+        let _ = std::fs::write(p.with_extension("toml.harbor-bak"), &original);
+    }
+    let mut doc = original
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| format!("parsing ~/.codex/config.toml: {e}"))?;
+
+    // Compatibility flag for streamable-HTTP MCP on older Codex (harmless on new).
+    doc["experimental_use_rmcp_client"] = toml_edit::value(true);
+
+    let url = format!("http://127.0.0.1:{}/mcp", state.mcp.port);
+    let mut headers = toml_edit::InlineTable::new();
+    headers.insert(
+        "Authorization",
+        toml_edit::Value::from(format!("Bearer {}", state.mcp.token)),
+    );
+
+    let mut tbl = toml_edit::Table::new();
+    tbl["url"] = toml_edit::value(url);
+    tbl["http_headers"] = toml_edit::value(headers);
+
+    if !doc.get("mcp_servers").map(|i| i.is_table()).unwrap_or(false) {
+        doc["mcp_servers"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    doc["mcp_servers"]["harbor"] = toml_edit::Item::Table(tbl);
+
+    std::fs::write(&p, doc.to_string()).map_err(|e| e.to_string())?;
+    Ok("Connected to Codex — restart Codex to use Harbor.".to_string())
+}
+
+// ---- "Fix with AI": diagnose a failed service via Claude/Codex --------------
+
+#[derive(Serialize)]
+pub struct FixResult {
+    pub agent: String,
+    pub response: String,
+}
+
+async fn build_fix_prompt(state: &AppState, app: &str, service: &str) -> String {
+    let cfg = state.get_config(app).await;
+    let logs = state.supervisor.logs(app, service, 60).await;
+    let snap = state.supervisor.snapshot(app).await;
+    let svc = cfg.as_ref().and_then(|c| c.service(service).cloned());
+    let sr = snap
+        .as_ref()
+        .and_then(|s| s.services.iter().find(|x| x.name == service).cloned());
+    let root = cfg.as_ref().map(|c| c.root.clone()).unwrap_or_default();
+
+    let mut p = String::new();
+    p.push_str(
+        "A local dev service failed to start (managed by Harbor, a local server orchestrator). \
+         Diagnose the root cause and give the exact fix — commands to run and/or config changes. \
+         Be concise and specific.\n\n",
+    );
+    p.push_str(&format!("App: {app}\nService: {service}\n"));
+    if let Some(svc) = &svc {
+        p.push_str(&format!("Command: {}\n", svc.command));
+        let cwd = if svc.cwd == "." {
+            root.clone()
+        } else {
+            format!("{root}/{}", svc.cwd)
+        };
+        p.push_str(&format!("Working directory: {cwd}\n"));
+    } else {
+        p.push_str(&format!("Working directory: {root}\n"));
+    }
+    if let Some(sr) = &sr {
+        if let Some(code) = sr.exit_code {
+            p.push_str(&format!("Exit code: {code}\n"));
+        }
+    }
+    p.push_str("\nRecent output:\n");
+    for l in logs.iter() {
+        p.push_str(&l.line);
+        p.push('\n');
+    }
+    p.push_str("\nWhat went wrong, and exactly how do I fix it?");
+    p
+}
+
+#[tauri::command]
+pub async fn fix_prompt(
+    state: State<'_, Arc<AppState>>,
+    app: String,
+    service: String,
+) -> Result<String, String> {
+    Ok(build_fix_prompt(&state, &app, &service).await)
+}
+
+#[tauri::command]
+pub async fn run_fix(
+    state: State<'_, Arc<AppState>>,
+    app: String,
+    service: String,
+) -> Result<FixResult, String> {
+    let prompt = build_fix_prompt(&state, &app, &service).await;
+    let path = crate::sysenv::enriched_path().unwrap_or_default();
+    let root = state.get_config(&app).await.map(|c| c.root).unwrap_or_default();
+    let dir = if root.is_empty() {
+        ".".to_string()
+    } else {
+        root
+    };
+    let timeout = std::time::Duration::from_secs(150);
+
+    if let Some(codex) = crate::sysenv::resolve_bin("codex") {
+        let fut = tokio::process::Command::new(codex)
+            .args(["exec", "--sandbox", "read-only", "--skip-git-repo-check", &prompt])
+            .current_dir(&dir)
+            .env("PATH", &path)
+            .output();
+        if let Ok(Ok(out)) = tokio::time::timeout(timeout, fut).await {
+            let resp = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !resp.is_empty() {
+                return Ok(FixResult {
+                    agent: "Codex".to_string(),
+                    response: resp,
+                });
+            }
+        }
+    }
+    if let Some(claude) = crate::sysenv::resolve_bin("claude") {
+        let fut = tokio::process::Command::new(claude)
+            .args([
+                "--bare",
+                "-p",
+                &prompt,
+                "--allowedTools",
+                "Read",
+                "--output-format",
+                "text",
+            ])
+            .current_dir(&dir)
+            .env("PATH", &path)
+            .output();
+        if let Ok(Ok(out)) = tokio::time::timeout(timeout, fut).await {
+            let resp = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !resp.is_empty() {
+                return Ok(FixResult {
+                    agent: "Claude".to_string(),
+                    response: resp,
+                });
+            }
+        }
+    }
+    Err("no-agent".to_string())
 }
 
 /// Bring the main window to the front (from the tray panel), optionally selecting

@@ -2,11 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
+  AgentStatus,
   AppConfig,
   AppListItem,
   AppRunSnapshot,
-  ClaudeStatus,
   Detection,
+  FixResult,
   LogLine,
   McpInfo,
   StatusEvent,
@@ -35,9 +36,14 @@ export const api = {
   exportApp: (app: string) => invoke<string>("export_app", { app }),
   showMainWindow: (select?: string) =>
     invoke<void>("show_main_window", { select }),
-  claudeStatus: () => invoke<ClaudeStatus>("claude_status"),
+  agentsStatus: () => invoke<AgentStatus>("agents_status"),
   connectClaudeCode: () => invoke<string>("connect_claude_code"),
   connectClaudeDesktop: () => invoke<string>("connect_claude_desktop"),
+  connectCodex: () => invoke<string>("connect_codex"),
+  fixPrompt: (app: string, service: string) =>
+    invoke<string>("fix_prompt", { app, service }),
+  runFix: (app: string, service: string) =>
+    invoke<FixResult>("run_fix", { app, service }),
 };
 
 /** Native macOS folder picker; returns the chosen directory or null. */

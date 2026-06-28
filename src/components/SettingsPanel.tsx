@@ -11,7 +11,7 @@ import {
   InfoCircledIcon,
 } from "@radix-ui/react-icons";
 import { api } from "../api";
-import type { ClaudeStatus, McpInfo } from "../types";
+import type { AgentStatus, McpInfo } from "../types";
 
 function CopyButton({ text, label }: { text: string; label: string }) {
   const [done, setDone] = useState(false);
@@ -98,17 +98,21 @@ function ConnectCard({
   );
 }
 
-export function SettingsPanel() {
+export function SettingsPanel({
+  onAgentsChanged,
+}: {
+  onAgentsChanged?: () => void;
+}) {
   const [info, setInfo] = useState<McpInfo | null>(null);
-  const [status, setStatus] = useState<ClaudeStatus | null>(null);
-  const [busy, setBusy] = useState<"code" | "desktop" | null>(null);
+  const [status, setStatus] = useState<AgentStatus | null>(null);
+  const [busy, setBusy] = useState<"code" | "desktop" | "codex" | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [showManual, setShowManual] = useState(false);
   const [reveal, setReveal] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      setStatus(await api.claudeStatus());
+      setStatus(await api.agentsStatus());
     } catch {
       /* ignore */
     }
@@ -119,16 +123,19 @@ export function SettingsPanel() {
     refresh();
   }, [refresh]);
 
-  async function connect(which: "code" | "desktop") {
+  async function connect(which: "code" | "desktop" | "codex") {
     setBusy(which);
     setMsg(null);
     try {
       const text =
         which === "code"
           ? await api.connectClaudeCode()
-          : await api.connectClaudeDesktop();
+          : which === "desktop"
+            ? await api.connectClaudeDesktop()
+            : await api.connectCodex();
       setMsg({ ok: true, text });
       await refresh();
+      onAgentsChanged?.();
     } catch (e) {
       setMsg({ ok: false, text: String(e) });
     } finally {
@@ -138,6 +145,7 @@ export function SettingsPanel() {
 
   if (!info) return null;
   const token = reveal ? info.token : "•".repeat(40);
+  const codexToml = `[mcp_servers.harbor]\nurl = "${info.url}"\nhttp_headers = { Authorization = "Bearer ${info.token}" }`;
 
   return (
     <div className="settings">
@@ -218,6 +226,29 @@ export function SettingsPanel() {
                 <CopyButton text={info.desktopJson} label="Copy JSON" />
               </div>
               <div className="code-block">{info.desktopJson}</div>
+            </>
+          }
+        />
+
+        <ConnectCard
+          title="Codex"
+          subtitle="Add Harbor to ~/.codex/config.toml."
+          connected={status?.codexConnected ?? false}
+          available={status?.codexInstalled ?? false}
+          unavailableNote="Not detected"
+          connectedHint="Added · restart Codex to use it."
+          connectLabel="Connect Codex"
+          busy={busy === "codex"}
+          onConnect={() => connect("codex")}
+          fallback={
+            <>
+              <Text size="1" color="gray" as="div" mb="1">
+                Codex wasn't detected. Add this to <Code>~/.codex/config.toml</Code>:
+              </Text>
+              <div className="row" style={{ justifyContent: "flex-end", marginBottom: 6 }}>
+                <CopyButton text={codexToml} label="Copy TOML" />
+              </div>
+              <div className="code-block">{codexToml}</div>
             </>
           }
         />
