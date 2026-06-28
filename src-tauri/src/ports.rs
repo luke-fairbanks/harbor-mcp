@@ -1,0 +1,241 @@
+//! Port intelligence (DESIGN.md §4): topological ordering, preferred→free
+//! allocation, and `${...}` placeholder resolution + dependent rewiring.
+//!
+//! All of this is pure logic over config + a set of already-taken ports, so it's
+//! unit-testable without spawning anything.
+
+use crate::model::{PortPlanEntry, ServiceConfig};
+use anyhow::{anyhow, bail, Result};
+use std::collections::{BTreeMap, HashSet};
+use std::net::TcpListener;
+
+/// How far upward to scan from a preferred port before giving up.
+const SCAN_SPAN: u16 = 500;
+
+/// Order `services` so every service comes after the ones it `dependsOn`
+/// (Kahn's algorithm). Errors on cycles or references to unknown services.
+pub fn topo_sort(services: &[ServiceConfig]) -> Result<Vec<ServiceConfig>> {
+    let names: HashSet<&str> = services.iter().map(|s| s.name.as_str()).collect();
+    let mut indegree: BTreeMap<&str, usize> = services.iter().map(|s| (s.name.as_str(), 0)).collect();
+    let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+
+    for s in services {
+        for dep in &s.depends_on {
+            if !names.contains(dep.as_str()) {
+                bail!("service '{}' dependsOn unknown service '{}'", s.name, dep);
+            }
+            // dep -> s
+            edges.entry(dep.as_str()).or_default().push(s.name.as_str());
+            *indegree.get_mut(s.name.as_str()).unwrap() += 1;
+        }
+    }
+
+    // Seed with zero-indegree nodes, preserving the original declaration order
+    // for determinism.
+    let mut queue: Vec<&str> = services
+        .iter()
+        .map(|s| s.name.as_str())
+        .filter(|n| indegree[n] == 0)
+        .collect();
+    let mut ordered: Vec<&str> = Vec::with_capacity(services.len());
+
+    while let Some(n) = queue_pop_front(&mut queue) {
+        ordered.push(n);
+        if let Some(children) = edges.get(n) {
+            for &c in children {
+                let d = indegree.get_mut(c).unwrap();
+                *d -= 1;
+                if *d == 0 {
+                    queue.push(c);
+                }
+            }
+        }
+    }
+
+    if ordered.len() != services.len() {
+        bail!("dependency cycle detected among services");
+    }
+
+    // Map names back to (cloned) configs in topo order.
+    let by_name: BTreeMap<&str, &ServiceConfig> =
+        services.iter().map(|s| (s.name.as_str(), s)).collect();
+    Ok(ordered.into_iter().map(|n| by_name[n].clone()).collect())
+}
+
+fn queue_pop_front<'a>(q: &mut Vec<&'a str>) -> Option<&'a str> {
+    if q.is_empty() {
+        None
+    } else {
+        Some(q.remove(0))
+    }
+}
+
+/// True if `port` is free to bind. Dev servers usually bind the wildcard address
+/// (Node `listen(port)` binds `[::]` dual-stack, which also covers IPv4), so we
+/// probe **both** the IPv4 and IPv6 wildcards and call the port free only if both
+/// binds succeed. Probing just `127.0.0.1` would miss an `[::]` holder and let us
+/// hand out a port that the service then can't bind (EADDRINUSE).
+pub fn is_port_free(port: u16) -> bool {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    let v4 = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok();
+    let v6 = TcpListener::bind((Ipv6Addr::UNSPECIFIED, port)).is_ok();
+    v4 && v6
+}
+
+/// Pick a concrete port for a preferred value, skipping `taken` and anything the
+/// OS reports as busy. Returns `(resolved, note)`.
+fn allocate_one(preferred: u16, taken: &HashSet<u16>) -> Result<(u16, Option<String>)> {
+    if !taken.contains(&preferred) && is_port_free(preferred) {
+        return Ok((preferred, None));
+    }
+    let start = preferred.saturating_add(1);
+    for p in start..=start.saturating_add(SCAN_SPAN) {
+        if p == 0 {
+            continue;
+        }
+        if !taken.contains(&p) && is_port_free(p) {
+            return Ok((p, Some(format!("{preferred} was busy → {p}"))));
+        }
+    }
+    Err(anyhow!(
+        "no free port found near {preferred} (scanned {SCAN_SPAN})"
+    ))
+}
+
+/// The resolved-port map for a run plus the human-readable plan.
+pub struct Allocation {
+    /// service name → resolved port (only services that declared a port).
+    pub ports: BTreeMap<String, u16>,
+    pub plan: Vec<PortPlanEntry>,
+}
+
+/// Allocate ports for `ordered` services (already topo-sorted). `reserved` holds
+/// ports already claimed by other live Harbor runs, which we never reuse.
+pub fn allocate(ordered: &[ServiceConfig], reserved: &HashSet<u16>) -> Result<Allocation> {
+    let mut taken = reserved.clone();
+    let mut ports: BTreeMap<String, u16> = BTreeMap::new();
+    let mut plan: Vec<PortPlanEntry> = Vec::new();
+
+    for svc in ordered {
+        let Some(pref) = svc.port else { continue };
+        let (resolved, note) = allocate_one(pref, &taken)?;
+        taken.insert(resolved);
+        ports.insert(svc.name.clone(), resolved);
+        plan.push(PortPlanEntry {
+            service: svc.name.clone(),
+            preferred: Some(pref),
+            resolved,
+            note,
+        });
+    }
+
+    Ok(Allocation { ports, plan })
+}
+
+/// Resolve `${PORT}` and `${services.<name>.port}` inside a string against the
+/// resolved-port map. `own` is this service's port (for bare `${PORT}`).
+/// Unknown placeholders are left untouched (e.g. `${HOME}` for the shell).
+pub fn resolve_placeholders(input: &str, own: Option<u16>, ports: &BTreeMap<String, u16>) -> String {
+    // Tiny hand-rolled scanner — avoids a regex dependency for one pattern.
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            if let Some(end) = input[i + 2..].find('}') {
+                let key = &input[i + 2..i + 2 + end];
+                if let Some(val) = lookup(key, own, ports) {
+                    out.push_str(&val);
+                    i = i + 2 + end + 1;
+                    continue;
+                }
+            }
+        }
+        // Not a recognized placeholder — emit the byte as-is.
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn lookup(key: &str, own: Option<u16>, ports: &BTreeMap<String, u16>) -> Option<String> {
+    if key == "PORT" {
+        return own.map(|p| p.to_string());
+    }
+    // services.<name>.port
+    if let Some(rest) = key.strip_prefix("services.") {
+        if let Some(name) = rest.strip_suffix(".port") {
+            return ports.get(name).map(|p| p.to_string());
+        }
+    }
+    None
+}
+
+/// Resolve all placeholders in a service's command + env, returning the concrete
+/// command line and a fully-resolved env map.
+pub fn resolve_service(
+    svc: &ServiceConfig,
+    ports: &BTreeMap<String, u16>,
+) -> (String, BTreeMap<String, String>) {
+    let own = ports.get(&svc.name).copied();
+    let command = resolve_placeholders(&svc.command, own, ports);
+    let env = svc
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), resolve_placeholders(v, own, ports)))
+        .collect();
+    (command, env)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ServiceConfig;
+    use std::collections::BTreeMap as Map;
+
+    fn svc(name: &str, port: Option<u16>, deps: &[&str]) -> ServiceConfig {
+        ServiceConfig {
+            name: name.into(),
+            cwd: ".".into(),
+            command: "true".into(),
+            port,
+            env: Map::new(),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            health_check: None,
+            ready_log_pattern: None,
+        }
+    }
+
+    #[test]
+    fn topo_orders_deps_first() {
+        let s = vec![svc("web", Some(5173), &["api"]), svc("api", Some(4321), &[])];
+        let ordered = topo_sort(&s).unwrap();
+        assert_eq!(ordered[0].name, "api");
+        assert_eq!(ordered[1].name, "web");
+    }
+
+    #[test]
+    fn topo_detects_cycle() {
+        let s = vec![svc("a", None, &["b"]), svc("b", None, &["a"])];
+        assert!(topo_sort(&s).is_err());
+    }
+
+    #[test]
+    fn placeholders_resolve() {
+        let mut ports = Map::new();
+        ports.insert("api".to_string(), 4322u16);
+        let out = resolve_placeholders(
+            "vite --proxy http://127.0.0.1:${services.api.port} --port ${PORT}",
+            Some(5173),
+            &ports,
+        );
+        assert_eq!(out, "vite --proxy http://127.0.0.1:4322 --port 5173");
+    }
+
+    #[test]
+    fn unknown_placeholder_untouched() {
+        let ports = Map::new();
+        let out = resolve_placeholders("echo ${HOME}", None, &ports);
+        assert_eq!(out, "echo ${HOME}");
+    }
+}
