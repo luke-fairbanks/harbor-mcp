@@ -38,7 +38,10 @@ impl AppState {
     pub async fn upsert(&self, cfg: AppConfig) -> Result<()> {
         let mut reg = self.registry.write().await;
         reg.insert(cfg.name.clone(), cfg);
-        self.persist(&reg)
+        self.persist(&reg)?;
+        drop(reg);
+        self.supervisor.notify_registry_changed();
+        Ok(())
     }
 
     pub async fn remove(&self, name: &str) -> Result<bool> {
@@ -46,6 +49,8 @@ impl AppState {
         let existed = reg.remove(name).is_some();
         if existed {
             self.persist(&reg)?;
+            drop(reg);
+            self.supervisor.notify_registry_changed();
         }
         Ok(existed)
     }
@@ -58,6 +63,8 @@ impl AppState {
         };
         f(cfg);
         self.persist(&reg)?;
+        drop(reg);
+        self.supervisor.notify_registry_changed();
         Ok(true)
     }
 

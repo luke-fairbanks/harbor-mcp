@@ -61,6 +61,14 @@ struct DetectArg {
     path: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RegisterArg {
+    /// Full app config JSON: { name, root, services: [{ name, cwd, command,
+    /// port?, env, dependsOn, healthCheck?, readyLogPattern? }], profiles }.
+    /// Tip: call detect_app first and pass (a corrected) `proposed` here.
+    config: Value,
+}
+
 /// Uniform object-rooted output wrapper. rmcp requires a tool's `outputSchema`
 /// root to be type `"object"`; a bare `serde_json::Value` schema is `"any"` and
 /// is rejected at runtime. Wrapping the payload under `result` guarantees a
@@ -163,6 +171,22 @@ impl HarborMcp {
         let det = detect::detect(&p);
         Ok(out(serde_json::to_value(det).map_err(|e| e.to_string())?))
     }
+
+    #[rmcp::tool(
+        description = "Register (or update) an app config in Harbor. Saves it to the registry; \
+                       does NOT start it. Pass the full config JSON (e.g. detect_app's proposed, \
+                       corrected as needed)."
+    )]
+    async fn register_app(
+        &self,
+        Parameters(RegisterArg { config }): Parameters<RegisterArg>,
+    ) -> Result<Json<JsonOut>, String> {
+        let cfg: crate::model::AppConfig =
+            serde_json::from_value(config).map_err(|e| format!("invalid config: {e}"))?;
+        let name = cfg.name.clone();
+        self.state.upsert(cfg).await.map_err(|e| e.to_string())?;
+        Ok(out(json!({ "registered": name })))
+    }
 }
 
 #[rmcp::tool_handler]
@@ -173,8 +197,9 @@ impl ServerHandler for HarborMcp {
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
                 "Harbor: registers local apps and runs their services with automatic port \
-                 allocation. Use list_apps/app_status to inspect, detect_app to scan a folder, \
-                 start_app/stop_app to control lifecycle, get_logs to debug."
+                 allocation. Use list_apps/app_status to inspect, detect_app to scan a folder \
+                 and register_app to save a config, start_app/stop_app to control lifecycle, \
+                 get_logs to debug."
                     .to_string(),
             )
     }

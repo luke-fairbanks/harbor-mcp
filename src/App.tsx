@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Tooltip } from "@radix-ui/themes";
 import { CheckCircledIcon, GearIcon, PlusIcon } from "@radix-ui/react-icons";
 import { motion } from "framer-motion";
-import { api, onLog, onSelect, onStatus } from "./api";
+import { api, onLog, onRegistry, onSelect, onStatus } from "./api";
 import type { AgentStatus, AppListItem, AppRunSnapshot, LogLine } from "./types";
 import { StatusDot, aggregateStatus } from "./components/StatusDot";
 import { AppDetail } from "./components/AppDetail";
@@ -63,6 +63,7 @@ export default function App() {
     let offLog: (() => void) | undefined;
     let offStatus: (() => void) | undefined;
     let offSelect: (() => void) | undefined;
+    let offRegistry: (() => void) | undefined;
 
     onLog((l) => {
       setLogs((prev) => {
@@ -82,13 +83,19 @@ export default function App() {
       setView("app");
     }).then((u) => (cancelled ? u() : (offSelect = u)));
 
+    // An app was registered/updated (e.g. over MCP) — refresh the list.
+    onRegistry(() => refreshList()).then((u) =>
+      cancelled ? u() : (offRegistry = u),
+    );
+
     return () => {
       cancelled = true;
       offLog?.();
       offStatus?.();
       offSelect?.();
+      offRegistry?.();
     };
-  }, [refreshApp]);
+  }, [refreshApp, refreshList]);
 
   const selectedItem = items.find((i) => i.config.name === selected) ?? null;
 

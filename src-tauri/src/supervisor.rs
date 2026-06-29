@@ -36,6 +36,7 @@ const HEALTH_POLL: Duration = Duration::from_millis(350);
 
 pub const LOG_EVENT: &str = "harbor://log";
 pub const STATUS_EVENT: &str = "harbor://status";
+pub const REGISTRY_EVENT: &str = "harbor://registry";
 
 /// Shared maps, cloned into the per-service tasks.
 type Runs = Arc<Mutex<BTreeMap<String, AppRun>>>;
@@ -101,6 +102,11 @@ impl Supervisor {
             seq: Arc::new(AtomicU64::new(0)),
             user_path,
         }
+    }
+
+    /// Tell the UI the registry changed (e.g. an app was registered over MCP).
+    pub fn notify_registry_changed(&self) {
+        let _ = self.app.emit(REGISTRY_EVENT, ());
     }
 
     pub async fn is_running(&self, app_name: &str) -> bool {

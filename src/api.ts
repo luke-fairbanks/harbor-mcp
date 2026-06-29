@@ -67,3 +67,8 @@ export function onStatus(cb: (s: StatusEvent) => void): Promise<UnlistenFn> {
 export function onSelect(cb: (app: string) => void): Promise<UnlistenFn> {
   return listen<string>("harbor://select", (e) => cb(e.payload));
 }
+
+/** Fired when the registry changes (e.g. an app registered over MCP). */
+export function onRegistry(cb: () => void): Promise<UnlistenFn> {
+  return listen("harbor://registry", () => cb());
+}
