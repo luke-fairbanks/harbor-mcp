@@ -333,10 +333,24 @@ pub async fn connect_claude_desktop(state: State<'_, Arc<AppState>>) -> Result<S
         root = serde_json::json!({});
     }
 
+    // Claude Desktop's config is stdio-only, so bridge to our HTTP server with
+    // `mcp-remote`. Use an absolute `npx` (Claude Desktop launches commands with
+    // a minimal PATH), and pass the bearer header via an env var to dodge the
+    // mcp-remote `--header` space-splitting bug.
+    let npx = crate::sysenv::resolve_bin("npx")
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "npx".to_string());
+    let url = format!("http://127.0.0.1:{}/mcp", state.mcp.port);
+    // `--allow-http` because the endpoint is plain http on loopback;
+    // `--transport http-only` skips an SSE-fallback probe (we serve /mcp).
     let entry = serde_json::json!({
-        "type": "http",
-        "url": format!("http://127.0.0.1:{}/mcp", state.mcp.port),
-        "headers": { "Authorization": format!("Bearer {}", state.mcp.token) }
+        "command": npx,
+        "args": [
+            "-y", "mcp-remote", url,
+            "--header", "Authorization:${HARBOR_AUTH}",
+            "--allow-http", "--transport", "http-only"
+        ],
+        "env": { "HARBOR_AUTH": format!("Bearer {}", state.mcp.token) }
     });
 
     let obj = root.as_object_mut().unwrap();
@@ -353,7 +367,7 @@ pub async fn connect_claude_desktop(state: State<'_, Arc<AppState>>) -> Result<S
 
     let text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
     std::fs::write(&p, text).map_err(|e| e.to_string())?;
-    Ok("Added to Claude Desktop — restart it to use Harbor.".to_string())
+    Ok("Added to Claude Desktop — fully quit and reopen Claude Desktop to use Harbor.".to_string())
 }
 
 #[tauri::command]
@@ -546,7 +560,7 @@ pub fn build_mcp_info(token: &str, port: u16) -> McpInfo {
         "claude mcp add --transport http harbor {url} --header \"Authorization: Bearer {token}\""
     );
     let desktop_json = format!(
-        "{{\n  \"mcpServers\": {{\n    \"harbor\": {{\n      \"type\": \"http\",\n      \"url\": \"{url}\",\n      \"headers\": {{ \"Authorization\": \"Bearer {token}\" }}\n    }}\n  }}\n}}"
+        "{{\n  \"mcpServers\": {{\n    \"harbor\": {{\n      \"command\": \"npx\",\n      \"args\": [\"-y\", \"mcp-remote\", \"{url}\", \"--header\", \"Authorization:${{HARBOR_AUTH}}\", \"--allow-http\", \"--transport\", \"http-only\"],\n      \"env\": {{ \"HARBOR_AUTH\": \"Bearer {token}\" }}\n    }}\n  }}\n}}"
     );
     McpInfo {
         url,
