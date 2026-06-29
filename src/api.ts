@@ -31,6 +31,7 @@ export const api = {
     invoke<boolean>("set_port", { app, service, port }),
   detectApp: (path: string) => invoke<Detection>("detect_app", { path }),
   openApp: (app: string) => invoke<string>("open_app", { app }),
+  openUrl: (url: string) => invoke<void>("open_url", { url }),
   mcpInfo: () => invoke<McpInfo>("mcp_info"),
   importApp: (path: string) => invoke<AppConfig>("import_app", { path }),
   exportApp: (app: string) => invoke<string>("export_app", { app }),

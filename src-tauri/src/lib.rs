@@ -132,6 +132,7 @@ pub fn run() {
             commands::set_port,
             commands::detect_app,
             commands::open_app,
+            commands::open_url,
             commands::mcp_info,
             commands::import_app,
             commands::export_app,

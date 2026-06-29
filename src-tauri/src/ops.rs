@@ -45,13 +45,13 @@ pub async fn open_app(state: &AppState, app: &str) -> Result<String, String> {
     let port = pick
         .and_then(|s| s.port)
         .ok_or_else(|| "no running service exposes a port to open".to_string())?;
-    let url = format!("http://127.0.0.1:{port}");
+    let url = format!("http://localhost:{port}");
     open_url(&url)?;
     Ok(url)
 }
 
 #[cfg(target_os = "macos")]
-fn open_url(url: &str) -> Result<(), String> {
+pub fn open_url(url: &str) -> Result<(), String> {
     std::process::Command::new("open")
         .arg(url)
         .spawn()
@@ -60,7 +60,7 @@ fn open_url(url: &str) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn open_url(url: &str) -> Result<(), String> {
+pub fn open_url(url: &str) -> Result<(), String> {
     // Fallback for other platforms; xdg-open on Linux, start on Windows.
     #[cfg(target_os = "windows")]
     let (prog, args): (&str, Vec<&str>) = ("cmd", vec!["/C", "start", url]);

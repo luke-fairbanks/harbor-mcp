@@ -156,6 +156,16 @@ pub async fn open_app(state: State<'_, Arc<AppState>>, app: String) -> Result<St
     ops::open_app(&state, &app).await
 }
 
+/// Open an arbitrary http(s) URL (e.g. a service's localhost address) in the
+/// default browser.
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("only http(s) URLs can be opened".to_string());
+    }
+    ops::open_url(&url)
+}
+
 #[tauri::command]
 pub async fn mcp_info(state: State<'_, Arc<AppState>>) -> Result<McpInfo, String> {
     Ok(build_mcp_info(&state.mcp.token, state.mcp.port))

@@ -266,11 +266,21 @@ export function AppDetail({
                   {sr?.resolvedCommand ?? sc?.command ?? ""}
                 </div>
                 <div className="svc-meta">
-                  {sr?.port != null && (
-                    <span>
-                      port <b>{sr.port}</b>
-                    </span>
-                  )}
+                  {sr?.port != null &&
+                    (status === "ready" ? (
+                      <button
+                        className="svc-url"
+                        title="Open in browser"
+                        onClick={() => api.openUrl(`http://localhost:${sr.port}`)}
+                      >
+                        localhost:{sr.port}
+                        <ExternalLinkIcon width={11} height={11} />
+                      </button>
+                    ) : (
+                      <span>
+                        port <b>{sr.port}</b>
+                      </span>
+                    ))}
                   {sr?.pid != null && <span>pid {sr.pid}</span>}
                   {sc?.dependsOn && sc.dependsOn.length > 0 && (
                     <span>↳ {sc.dependsOn.join(", ")}</span>
