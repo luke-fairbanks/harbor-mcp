@@ -49,10 +49,15 @@ port allocation, watch resource usage, and read logs to debug.
 
 ## Install
 
-Download the signed, notarized **`.dmg`** from the
+Download the **`.dmg`** from the
 [latest release](https://github.com/luke-fairbanks/harbor-mcp/releases), open it,
-and drag Harbor to Applications. Releases are produced by an automated Developer
-ID–signed + Apple-notarized pipeline, so there's no Gatekeeper right-click dance.
+and drag Harbor to Applications.
+
+**First launch:** Harbor currently ships **unsigned**, so macOS will say it "can't
+verify the developer." Open it once via **System Settings → Privacy & Security →
+Open Anyway** (or right-click the app → **Open**) — you only do this once.
+*(Maintainers can turn on Developer ID signing + notarization to remove this step
+for everyone; the pipeline is ready — see [`DISTRIBUTING.md`](./DISTRIBUTING.md).)*
 
 ## Build it yourself
 

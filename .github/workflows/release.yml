@@ -53,8 +53,10 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Harbor ${{ github.ref_name }}"
           releaseBody: |
-            A code-signed, Apple-notarized macOS build — no right-click-to-open needed.
+            Universal macOS build (Intel + Apple Silicon).
 
-            **Install:** download the `.dmg` below, open it, and drag Harbor to Applications.
+            **Install:** download the `.dmg`, open it, and drag Harbor to Applications.
+            If macOS says it can't verify the developer (unsigned builds), open it once via
+            **System Settings → Privacy & Security → Open Anyway**.
           releaseDraft: true
           prerelease: false

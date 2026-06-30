@@ -9,6 +9,14 @@ The [`Release` workflow](.github/workflows/release.yml) does the build, signing,
 notarization, and release automatically when you push a version tag. You just do
 the one-time credential setup below.
 
+> **Signing is optional.** Notarization is *not* the App Store — it's a free Apple
+> malware scan that removes the Gatekeeper warning, and it needs the $99/yr
+> Developer ID. If you skip all of it, the **same workflow still produces a working
+> unsigned `.dmg`** — just push a tag without adding any `APPLE_*` secrets. Users
+> then click through a one-time *System Settings → Privacy & Security → Open Anyway*
+> on first launch, which is normal for an open-source dev tool. Add the secrets
+> later to upgrade to a notarized build with zero rework.
+
 ---
 
 ## 1. Create a Developer ID Application certificate
