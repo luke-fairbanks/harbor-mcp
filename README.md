@@ -1,4 +1,10 @@
-# ⚓ Harbor
+<div align="center">
+
+<img src="assets/social-preview.png" alt="Harbor — boot every local dev server with one button; smart ports, crash recovery, MCP-native" width="820" />
+
+</div>
+
+# Harbor
 
 A polished, native macOS app that boots all the local servers a project needs
 with **one button** — with intelligent port allocation, crash recovery, and an
