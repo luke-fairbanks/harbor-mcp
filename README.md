@@ -47,17 +47,23 @@ port allocation, watch resource usage, and read logs to debug.
 - **MCP-native** — an in-process Streamable-HTTP MCP server (bound to `127.0.0.1`,
   per-install bearer token) exposes the whole lifecycle to an agent.
 
-## Run it
+## Install
+
+Download the signed, notarized **`.dmg`** from the
+[latest release](https://github.com/luke-fairbanks/harbor-mcp/releases), open it,
+and drag Harbor to Applications. Releases are produced by an automated Developer
+ID–signed + Apple-notarized pipeline, so there's no Gatekeeper right-click dance.
+
+## Build it yourself
 
 ```bash
 npm install
 npm run tauri dev      # dev window + MCP server on 127.0.0.1:7777
-npm run tauri build    # produces a distributable .app / .dmg
+npm run tauri build    # produces a .app / .dmg (unsigned unless you set up signing)
 ```
 
-The `.app`/`.dmg` are **unsigned** — first launch is right-click → Open
-(Gatekeeper). Code signing + notarization is the remaining step for wide
-distribution.
+Maintainers: see [`DISTRIBUTING.md`](./DISTRIBUTING.md) for code signing,
+notarization, and how to cut a release.
 
 ## Connect your Claude (or Codex)
 

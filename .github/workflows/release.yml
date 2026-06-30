@@ -1,0 +1,60 @@
+name: Release
+
+# Cut a release by pushing a version tag that matches the version in
+# src-tauri/tauri.conf.json, e.g.:
+#   git tag v0.1.0 && git push origin v0.1.0
+# This builds a UNIVERSAL (Intel + Apple Silicon) .dmg, code-signs it with your
+# Developer ID, notarizes it with Apple, and attaches it to a draft GitHub
+# Release. See DISTRIBUTING.md for the one-time secret setup.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write # tauri-action needs this to create the Release
+
+jobs:
+  release:
+    runs-on: macos-latest # Apple Silicon runner; we cross-compile a universal binary
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (with both macOS targets for a universal build)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build, sign, notarize, and publish the release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- Code signing (Developer ID Application certificate) ---
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          # --- Notarization (Apple ID + app-specific password) ---
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          args: --target universal-apple-darwin
+          tagName: ${{ github.ref_name }}
+          releaseName: "Harbor ${{ github.ref_name }}"
+          releaseBody: |
+            A code-signed, Apple-notarized macOS build — no right-click-to-open needed.
+
+            **Install:** download the `.dmg` below, open it, and drag Harbor to Applications.
+          releaseDraft: true
+          prerelease: false
