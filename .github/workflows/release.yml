@@ -3,9 +3,10 @@ name: Release
 # Cut a release by pushing a version tag that matches the version in
 # src-tauri/tauri.conf.json, e.g.:
 #   git tag v0.1.0 && git push origin v0.1.0
-# This builds a UNIVERSAL (Intel + Apple Silicon) .dmg, code-signs it with your
-# Developer ID, notarizes it with Apple, and attaches it to a draft GitHub
-# Release. See DISTRIBUTING.md for the one-time secret setup.
+# Builds a UNIVERSAL (Intel + Apple Silicon) .dmg and attaches it to a draft
+# GitHub Release. If the Apple signing secrets are configured (see
+# DISTRIBUTING.md) the build is code-signed + notarized; otherwise it ships
+# unsigned (users do a one-time "Open Anyway"). Same tag flow either way.
 
 on:
   push:
@@ -35,16 +36,30 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build, sign, notarize, and publish the release
+      # Decide signed-vs-unsigned WITHOUT leaving an empty APPLE_CERTIFICATE in
+      # the build env — an empty-but-present var makes Tauri try (and fail) to sign.
+      - name: Detect signing secrets
+        id: signing
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+        run: |
+          if [ -n "$CERT" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Apple signing secrets — building an UNSIGNED .dmg."
+          fi
+
+      # --- Signed + notarized build (Apple secrets present) ---
+      - name: Build, sign, notarize, and publish
+        if: steps.signing.outputs.enabled == 'true'
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # --- Code signing (Developer ID Application certificate) ---
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          # --- Notarization (Apple ID + app-specific password) ---
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -56,7 +71,24 @@ jobs:
             Universal macOS build (Intel + Apple Silicon).
 
             **Install:** download the `.dmg`, open it, and drag Harbor to Applications.
-            If macOS says it can't verify the developer (unsigned builds), open it once via
-            **System Settings → Privacy & Security → Open Anyway**.
+          releaseDraft: true
+          prerelease: false
+
+      # --- Unsigned build (no Apple secrets configured) ---
+      - name: Build and publish (unsigned)
+        if: steps.signing.outputs.enabled == 'false'
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --target universal-apple-darwin
+          tagName: ${{ github.ref_name }}
+          releaseName: "Harbor ${{ github.ref_name }}"
+          releaseBody: |
+            Universal macOS build (Intel + Apple Silicon).
+
+            **Install:** download the `.dmg`, open it, and drag Harbor to Applications.
+            macOS will say it can't verify the developer (this build is unsigned) —
+            open it once via **System Settings → Privacy & Security → Open Anyway**.
           releaseDraft: true
           prerelease: false
