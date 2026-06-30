@@ -67,7 +67,7 @@
   <g font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
     <text x="500" y="296" font-size="132" font-weight="800" fill="#ffffff" letter-spacing="-4">Harbor</text>
     <text x="506" y="364" font-size="33" font-weight="600" fill="#cfe0ef">Boot every local dev server with one button.</text>
-    <text x="506" y="414" font-size="26" font-weight="500" fill="#7fa6c6">Smart ports · crash recovery · live resource monitor · MCP-native</text>
+    <text x="506" y="414" font-size="26" font-weight="500" fill="#7fa6c6">Smart ports · crash recovery · live resource monitor</text>
 
     <!-- feature pills -->
     <g font-size="23" font-weight="600" fill="#dbe9f5" text-anchor="middle">
