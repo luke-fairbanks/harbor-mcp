@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/social-preview.png" alt="Harbor — boot every local dev server with one button; smart ports, crash recovery, MCP-native" width="820" />
+<img src="assets/banner.png" alt="Harbor — boot every local dev server with one button; smart ports, crash recovery, MCP-native" width="820" />
 
 </div>
 
