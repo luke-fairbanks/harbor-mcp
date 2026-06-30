@@ -1,18 +1,28 @@
 import { useMemo, useState } from "react";
-import { Button, Code, Dialog, Flex, Select, Spinner, Tooltip } from "@radix-ui/themes";
+import {
+  Button,
+  Code,
+  Dialog,
+  Flex,
+  Select,
+  Spinner,
+  Switch,
+  Tooltip,
+} from "@radix-ui/themes";
 import {
   CopyIcon,
   ExternalLinkIcon,
   MagicWandIcon,
   Pencil1Icon,
   PlayIcon,
+  ReloadIcon,
   Share1Icon,
   StopIcon,
   TrashIcon,
 } from "@radix-ui/react-icons";
 import { AnimatePresence, motion } from "framer-motion";
 import type { AppListItem, AppRunSnapshot, LogLine, ServiceRun } from "../types";
-import { api } from "../api";
+import { api, formatBytes } from "../api";
 import { StatusBadge, StatusDot } from "./StatusDot";
 import { LogPane } from "./LogPane";
 import { ConfigEditor } from "./ConfigEditor";
@@ -37,7 +47,9 @@ export function AppDetail({
   const [profile, setProfile] = useState(
     profiles.includes("default") ? "default" : profiles[0] ?? "default",
   );
-  const [busy, setBusy] = useState<null | "start" | "stop">(null);
+  const [busy, setBusy] = useState<
+    null | "start" | "stop" | "restart" | "config"
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
@@ -50,6 +62,7 @@ export function AppDetail({
   >(null);
 
   const running = run?.running ?? false;
+  const hasExternal = run?.services.some((s) => s.external) ?? false;
   const runByName = useMemo(() => {
     const m: Record<string, ServiceRun> = {};
     run?.services.forEach((s) => (m[s.name] = s));
@@ -61,11 +74,27 @@ export function AppDetail({
     running ? run!.services.map((s) => s.name) : profileServices
   ).filter((n, i, a) => a.indexOf(n) === i);
 
-  async function act(kind: "start" | "stop", fn: () => Promise<unknown>) {
+  async function act(
+    kind: "start" | "stop" | "restart",
+    fn: () => Promise<unknown>,
+  ) {
     setBusy(kind);
     setError(null);
     try {
       await fn();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+      onChanged();
+    }
+  }
+
+  async function toggleAutoRestart(v: boolean) {
+    setBusy("config");
+    setError(null);
+    try {
+      await api.updateApp(cfg.name, { ...cfg, autoRestart: v });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -121,6 +150,17 @@ export function AppDetail({
           <div className="detail-sub" data-no-drag>
             {cfg.root}
           </div>
+          <label className="auto-restart-toggle" data-no-drag>
+            <Switch
+              size="1"
+              checked={cfg.autoRestart ?? false}
+              onCheckedChange={toggleAutoRestart}
+              disabled={busy !== null}
+            />
+            <Tooltip content="If a service Harbor started exits unexpectedly, Harbor restarts it (up to 5 times, with backoff). Never affects servers started outside Harbor.">
+              <span>Auto-restart on crash</span>
+            </Tooltip>
+          </label>
         </div>
         <div className="row" style={{ flex: "none" }}>
           {!running && profiles.length > 1 && (
@@ -173,6 +213,15 @@ export function AppDetail({
             )}
           </AnimatePresence>
 
+          <Tooltip content="Restart">
+            <button
+              className="icon-btn"
+              disabled={!running || busy !== null}
+              onClick={() => act("restart", () => api.restartApp(cfg.name))}
+            >
+              <ReloadIcon className={busy === "restart" ? "spin" : undefined} />
+            </button>
+          </Tooltip>
           <Tooltip content="Open in browser">
             <button
               className="icon-btn"
@@ -260,7 +309,18 @@ export function AppDetail({
                     <StatusDot status={status} />
                     {name}
                   </span>
-                  <StatusBadge status={status} />
+                  <span className="row" style={{ gap: 6, flex: "none" }}>
+                    {sr?.external ? (
+                      <Tooltip content="Started outside Harbor (e.g. from a terminal). Harbor matched this process to the app by its port and project folder. Open and Stop work, but live logs aren't captured — Stop here, then Start to run it under Harbor with logs.">
+                        <span className="external-tag">external</span>
+                      </Tooltip>
+                    ) : sr?.adopted ? (
+                      <Tooltip content="Recovered from a previous Harbor session — Harbor holds its process and port, but live logs aren't available. Stop & Start to recapture output.">
+                        <span className="adopted-tag">adopted</span>
+                      </Tooltip>
+                    ) : null}
+                    <StatusBadge status={status} />
+                  </span>
                 </div>
                 <div className="svc-cmd">
                   {sr?.resolvedCommand ?? sc?.command ?? ""}
@@ -282,6 +342,18 @@ export function AppDetail({
                       </span>
                     ))}
                   {sr?.pid != null && <span>pid {sr.pid}</span>}
+                  {status !== "stopped" &&
+                    status !== "exited" &&
+                    sr?.cpu != null &&
+                    sr?.memBytes != null && (
+                      <span
+                        className="svc-res"
+                        title="Recent CPU% and resident memory for the whole process group"
+                      >
+                        {sr.cpu >= 10 ? sr.cpu.toFixed(0) : sr.cpu.toFixed(1)}% ·{" "}
+                        {formatBytes(sr.memBytes)}
+                      </span>
+                    )}
                   {sc?.dependsOn && sc.dependsOn.length > 0 && (
                     <span>↳ {sc.dependsOn.join(", ")}</span>
                   )}
@@ -328,12 +400,25 @@ export function AppDetail({
       <ConfirmDialog
         open={confirmStop}
         onOpenChange={setConfirmStop}
-        title={`Stop ${cfg.name}?`}
+        title={
+          hasExternal
+            ? `Stop ${cfg.name}? (started outside Harbor)`
+            : `Stop ${cfg.name}?`
+        }
         body={
-          <>
-            This sends <Code>SIGTERM</Code> then <Code>SIGKILL</Code> to the whole
-            process tree.
-          </>
+          hasExternal ? (
+            <>
+              This server was started <b>outside Harbor</b>. Stopping sends{" "}
+              <Code>SIGTERM</Code> then <Code>SIGKILL</Code> to its entire process
+              group — the terminal command that launched it and every child
+              process will be terminated.
+            </>
+          ) : (
+            <>
+              This sends <Code>SIGTERM</Code> then <Code>SIGKILL</Code> to the whole
+              process tree.
+            </>
+          )
         }
         confirmLabel="Stop"
         danger

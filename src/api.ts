@@ -10,6 +10,7 @@ import type {
   FixResult,
   LogLine,
   McpInfo,
+  ServiceStat,
   StatusEvent,
 } from "./types";
 
@@ -19,6 +20,10 @@ export const api = {
   startApp: (app: string, profile?: string) =>
     invoke<AppRunSnapshot>("start_app", { app, profile }),
   stopApp: (app: string) => invoke<void>("stop_app", { app }),
+  restartApp: (app: string, profile?: string) =>
+    invoke<AppRunSnapshot>("restart_app", { app, profile }),
+  startAll: () => invoke<void>("start_all"),
+  stopAll: () => invoke<void>("stop_all"),
   getLogs: (app: string, service: string, lines?: number) =>
     invoke<LogLine[]>("get_logs", { app, service, lines }),
   registerApp: (config: AppConfig) => invoke<void>("register_app", { config }),
@@ -30,6 +35,10 @@ export const api = {
   setPort: (app: string, service: string, port: number) =>
     invoke<boolean>("set_port", { app, service, port }),
   detectApp: (path: string) => invoke<Detection>("detect_app", { path }),
+  pathKind: (path: string) =>
+    invoke<"dir" | "file" | "missing">("path_kind", { path }),
+  readDotenv: (path: string) =>
+    invoke<Record<string, string>>("read_dotenv", { path }),
   openApp: (app: string) => invoke<string>("open_app", { app }),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
   mcpInfo: () => invoke<McpInfo>("mcp_info"),
@@ -53,8 +62,36 @@ export async function pickFolder(title?: string): Promise<string | null> {
   return typeof res === "string" ? res : null;
 }
 
+/** Native picker for a .env file; returns the chosen path or null. */
+export async function pickEnvFile(): Promise<string | null> {
+  const res = await open({
+    multiple: false,
+    title: "Choose a .env file",
+    filters: [{ name: "env", extensions: ["env", "txt", "*"] }],
+  });
+  return typeof res === "string" ? res : null;
+}
+
+/** Compact memory label: "84 MB", "1.2 GB" (summed group RSS, approximate). */
+export function formatBytes(b: number): string {
+  if (b < 1024) return `${b} B`;
+  const u = ["KB", "MB", "GB"];
+  let v = b / 1024;
+  let i = 0;
+  while (v >= 1024 && i < u.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
+}
+
 export const LOG_EVENT = "harbor://log";
 export const STATUS_EVENT = "harbor://status";
+export const STATS_EVENT = "harbor://stats";
+
+export function onStats(cb: (s: ServiceStat[]) => void): Promise<UnlistenFn> {
+  return listen<ServiceStat[]>(STATS_EVENT, (e) => cb(e.payload));
+}
 
 export function onLog(cb: (l: LogLine) => void): Promise<UnlistenFn> {
   return listen<LogLine>(LOG_EVENT, (e) => cb(e.payload));

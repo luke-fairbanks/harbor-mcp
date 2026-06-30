@@ -50,7 +50,14 @@ export function aggregateStatus(run?: AppRunSnapshot): ServiceStatus {
   const live = run.services.filter(
     (s) => s.status !== "exited" && s.status !== "stopped",
   );
-  if (!run.running || live.length === 0) return "stopped";
+  if (!run.running || live.length === 0) {
+    // A non-running app that has a service which crashed (non-zero exit) reads
+    // as a red "unhealthy" dot, not a neutral grey "stopped".
+    const crashed = run.services.some(
+      (s) => s.status === "exited" && s.exitCode != null && s.exitCode !== 0,
+    );
+    return crashed ? "unhealthy" : "stopped";
+  }
   if (live.some((s) => s.status === "starting")) return "starting";
   if (live.some((s) => s.status === "unhealthy")) return "unhealthy";
   return "ready";

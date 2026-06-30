@@ -6,21 +6,29 @@ use crate::store::{McpSettings, Registry, Store};
 use crate::supervisor::Supervisor;
 use anyhow::Result;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub struct AppState {
-    pub store: Store,
-    /// In-memory mirror of the registry; persisted on every mutation.
-    pub registry: RwLock<BTreeMap<String, AppConfig>>,
-    pub supervisor: Supervisor,
+    /// Shared with the supervisor, which persists/reads `runs.json` for adoption.
+    pub store: Arc<Store>,
+    /// In-memory mirror of the registry; persisted on every mutation. Shared
+    /// (`Arc`) with the supervisor so auto-restart reads live config at crash time.
+    pub registry: Arc<RwLock<BTreeMap<String, AppConfig>>>,
+    pub supervisor: Arc<Supervisor>,
     pub mcp: McpSettings,
 }
 
 impl AppState {
-    pub fn new(store: Store, registry: BTreeMap<String, AppConfig>, supervisor: Supervisor, mcp: McpSettings) -> Self {
+    pub fn new(
+        store: Arc<Store>,
+        registry: Arc<RwLock<BTreeMap<String, AppConfig>>>,
+        supervisor: Arc<Supervisor>,
+        mcp: McpSettings,
+    ) -> Self {
         AppState {
             store,
-            registry: RwLock::new(registry),
+            registry,
             supervisor,
             mcp,
         }

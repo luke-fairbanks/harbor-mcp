@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Badge, Button, Code, Dialog, Flex, Text } from "@radix-ui/themes";
+import { useEffect, useState } from "react";
+import { Badge, Button, Code, Dialog, Flex, Spinner, Text } from "@radix-ui/themes";
 import { DownloadIcon, FileIcon } from "@radix-ui/react-icons";
 import { api, pickFolder } from "../api";
 import type { Detection } from "../types";
@@ -8,15 +8,33 @@ export function RegisterDialog({
   open,
   onOpenChange,
   onRegistered,
+  initialDetection,
+  initialError,
+  scanning,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onRegistered: (name: string) => void;
+  initialDetection?: Detection | null;
+  initialError?: string | null;
+  scanning?: boolean;
 }) {
   const [path, setPath] = useState<string | null>(null);
   const [detection, setDetection] = useState<Detection | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Seed from a dropped-folder detection (or its error) when opened that way.
+  useEffect(() => {
+    if (!open) return;
+    if (initialDetection) {
+      setDetection(initialDetection);
+      setPath(initialDetection.proposed.root);
+      setError(null);
+    } else if (initialError) {
+      setError(initialError);
+    }
+  }, [open, initialDetection, initialError]);
 
   function reset() {
     setPath(null);
@@ -96,6 +114,12 @@ export function RegisterDialog({
             </Code>
           )}
         </Flex>
+
+        {scanning && !detection && !error && (
+          <Flex align="center" gap="2" mb="2" style={{ color: "var(--text-2)" }}>
+            <Spinner /> <Text size="2">Scanning project…</Text>
+          </Flex>
+        )}
 
         {error && (
           <Text size="1" color="tomato" className="mono" as="p" mb="2">

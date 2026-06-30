@@ -5,7 +5,7 @@ import {
   PlayIcon,
   StopIcon,
 } from "@radix-ui/react-icons";
-import { api, onStatus } from "../api";
+import { api, formatBytes, onStats, onStatus } from "../api";
 import type { AppListItem, AppRunSnapshot } from "../types";
 import { StatusDot, aggregateStatus } from "./StatusDot";
 import { AnchorMark } from "./icons";
@@ -32,6 +32,7 @@ export function TrayPanel() {
   useEffect(() => {
     let cancelled = false;
     let off: (() => void) | undefined;
+    let offStats: (() => void) | undefined;
     onStatus(async (s) => {
       const snap = await api.appStatus(s.app);
       setLive((prev) => ({
@@ -39,9 +40,28 @@ export function TrayPanel() {
         [s.app]: snap ?? { app: s.app, running: false, services: [], portPlan: [] },
       }));
     }).then((u) => (cancelled ? u() : (off = u)));
+    onStats((stats) => {
+      setLive((prev) => {
+        const next = { ...prev };
+        for (const st of stats) {
+          const snap = next[st.app];
+          if (!snap) continue;
+          next[st.app] = {
+            ...snap,
+            services: snap.services.map((s) =>
+              s.name === st.service
+                ? { ...s, cpu: st.cpu, memBytes: st.memBytes }
+                : s,
+            ),
+          };
+        }
+        return next;
+      });
+    }).then((u) => (cancelled ? u() : (offStats = u)));
     return () => {
       cancelled = true;
       off?.();
+      offStats?.();
     };
   }, []);
 
@@ -117,6 +137,18 @@ export function TrayPanel() {
               </button>
               {running && port != null && <span className="tray-port">:{port}</span>}
               <span className="spacer" />
+              {running &&
+                (() => {
+                  const sampled = run?.services.filter((s) => s.cpu != null) ?? [];
+                  if (!sampled.length) return null;
+                  const cpu = sampled.reduce((a, s) => a + (s.cpu ?? 0), 0);
+                  const mem = sampled.reduce((a, s) => a + (s.memBytes ?? 0), 0);
+                  return (
+                    <span className="tray-res">
+                      {cpu.toFixed(0)}% · {formatBytes(mem)}
+                    </span>
+                  );
+                })()}
               {running && (
                 <button
                   className="tray-act"

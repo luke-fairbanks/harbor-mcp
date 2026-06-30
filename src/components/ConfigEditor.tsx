@@ -7,32 +7,16 @@ import {
   IconButton,
   Select,
   Text,
-  TextArea,
   TextField,
 } from "@radix-ui/themes";
-import { PlusIcon, TrashIcon } from "@radix-ui/react-icons";
-import { api } from "../api";
+import { DownloadIcon, PlusIcon, TrashIcon } from "@radix-ui/react-icons";
+import { api, pickEnvFile } from "../api";
 import type { AppConfig, HealthCheck, ServiceConfig } from "../types";
 
 type HCType = "none" | "http" | "tcp" | "process" | "log";
 
 function hcType(hc?: HealthCheck): HCType {
   return hc ? hc.type : "none";
-}
-function envToText(env: Record<string, string>): string {
-  return Object.entries(env)
-    .map(([k, v]) => `${k}=${v}`)
-    .join("\n");
-}
-function textToEnv(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const line of text.split("\n")) {
-    const t = line.trim();
-    if (!t || t.startsWith("#")) continue;
-    const eq = t.indexOf("=");
-    if (eq > 0) out[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
-  }
-  return out;
 }
 
 export function ConfigEditor({
@@ -56,6 +40,30 @@ export function ConfigEditor({
       const services = d.services.map((s, j) => (j === i ? { ...s, ...patch } : s));
       return { ...d, services };
     });
+  }
+  function setEnvEntries(i: number, entries: [string, string][]) {
+    const env: Record<string, string> = {};
+    for (const [k, v] of entries) if (k.trim()) env[k.trim()] = v; // last wins, drop blanks
+    patchService(i, { env });
+  }
+  async function importDotenv(i: number) {
+    const file = await pickEnvFile();
+    if (!file) return;
+    const parsed = await api.readDotenv(file);
+    setDraft((d) => ({
+      ...d,
+      services: d.services.map((s, j) => {
+        if (j !== i) return s;
+        const merged = { ...s.env };
+        for (const [k, v] of Object.entries(parsed)) {
+          // Never let an imported literal clobber a Harbor-managed ${...} placeholder.
+          const cur = merged[k];
+          if (cur && /\$\{.*\}/.test(cur)) continue;
+          merged[k] = v;
+        }
+        return { ...s, env: merged };
+      }),
+    }));
   }
   function setHealth(i: number, type: HCType, extra?: Partial<HealthCheck>) {
     let hc: HealthCheck | undefined;
@@ -267,16 +275,71 @@ export function ConfigEditor({
                   )}
                 </Grid2>
 
-                <Labeled label="Environment (KEY=VALUE per line; supports ${PORT}, ${services.X.port})">
-                  <TextArea
-                    rows={2}
-                    value={envToText(s.env)}
-                    onChange={(e) =>
-                      patchService(i, { env: textToEnv(e.target.value) })
-                    }
-                    placeholder="PORT=${PORT}"
-                    style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}
-                  />
+                <Labeled label="Environment (supports ${PORT}, ${services.X.port})">
+                  <Flex direction="column" gap="1">
+                    {Object.entries(s.env).map(([k, v], r) => (
+                      <Flex gap="2" key={r} align="center">
+                        <TextField.Root
+                          size="1"
+                          style={{ flex: "0 0 38%", fontFamily: "var(--font-mono)" }}
+                          value={k}
+                          placeholder="KEY"
+                          onChange={(e) => {
+                            const entries = Object.entries(s.env);
+                            entries[r] = [e.target.value, v];
+                            setEnvEntries(i, entries);
+                          }}
+                        />
+                        <span style={{ color: "var(--text-3)" }}>=</span>
+                        <TextField.Root
+                          size="1"
+                          style={{ flex: 1, fontFamily: "var(--font-mono)" }}
+                          value={v}
+                          placeholder="value"
+                          onChange={(e) => {
+                            const entries = Object.entries(s.env);
+                            entries[r] = [k, e.target.value];
+                            setEnvEntries(i, entries);
+                          }}
+                        />
+                        <IconButton
+                          size="1"
+                          variant="soft"
+                          color="gray"
+                          onClick={() =>
+                            setEnvEntries(
+                              i,
+                              Object.entries(s.env).filter((_, j) => j !== r),
+                            )
+                          }
+                        >
+                          <TrashIcon />
+                        </IconButton>
+                      </Flex>
+                    ))}
+                    <Flex gap="2" mt="1" align="center">
+                      <Button
+                        size="1"
+                        variant="soft"
+                        onClick={() =>
+                          setEnvEntries(i, [...Object.entries(s.env), ["", ""]])
+                        }
+                      >
+                        <PlusIcon /> Add variable
+                      </Button>
+                      <Button
+                        size="1"
+                        variant="soft"
+                        color="gray"
+                        onClick={() => importDotenv(i)}
+                      >
+                        <DownloadIcon /> Import .env
+                      </Button>
+                    </Flex>
+                    <Text size="1" color="gray">
+                      Stored as plaintext. Env changes apply on next Start.
+                    </Text>
+                  </Flex>
                 </Labeled>
 
                 {otherNames(s.name).length > 0 && (

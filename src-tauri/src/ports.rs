@@ -82,6 +82,60 @@ pub fn is_port_free(port: u16) -> bool {
     v4 && v6
 }
 
+/// A literal port the command hard-codes — `-p 3002`, `--port 3002`, `-p=3002`,
+/// `--port=3002`, `-p3002`, or `-P 3002`. When present it is **authoritative**:
+/// the process will bind exactly this port regardless of what we'd allocate, so
+/// the plan/health-check/Open URL must all use it (never a bumped value).
+pub fn pinned_port(command: &str) -> Option<u16> {
+    let toks: Vec<&str> = command.split_whitespace().collect();
+    for (i, t) in toks.iter().enumerate() {
+        // `--port=3002` / `-p=3002`
+        if let Some(r) = t.strip_prefix("--port=").or_else(|| t.strip_prefix("-p=")) {
+            if let Ok(p) = r.parse() {
+                return Some(p);
+            }
+        }
+        // `-p3002` (no space, digits only)
+        if let Some(r) = t.strip_prefix("-p") {
+            if !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()) {
+                if let Ok(p) = r.parse() {
+                    return Some(p);
+                }
+            }
+        }
+        // `-p 3002` / `--port 3002` / `-P 3002`
+        if (*t == "-p" || *t == "--port" || *t == "-P") && i + 1 < toks.len() {
+            if let Ok(p) = toks[i + 1].parse() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Whether Harbor's allocated port actually reaches the process — i.e. the
+/// command or some env value references `${PORT}` / `${services.*.port}`. If it
+/// doesn't, the service binds a port of its own choosing (often hard-coded in a
+/// `package.json` dev script), so Harbor can't relocate it and must treat the
+/// configured port as fixed rather than bumping to a phantom value.
+pub fn injects_port(svc: &ServiceConfig) -> bool {
+    let refs = |s: &str| s.contains("${PORT}") || s.contains("${services.");
+    refs(&svc.command) || svc.env.values().any(|v| refs(v))
+}
+
+/// The port a service will actually bind, by the same precedence [`allocate`]
+/// uses for a HARD PIN: a command-literal port, else a fixed `svc.port` the
+/// command can't relocate (no `${PORT}`). Returns `None` for relocatable
+/// services (Harbor chooses those only at allocation, so there's nothing stable
+/// to detect an external process against) and for portless services. This is the
+/// port external-process detection probes, so it matches what the app binds.
+pub fn effective_port(svc: &ServiceConfig) -> Option<u16> {
+    pinned_port(&svc.command).or(match svc.port {
+        Some(p) if !injects_port(svc) => Some(p),
+        _ => None,
+    })
+}
+
 /// Pick a concrete port for a preferred value, skipping `taken` and anything the
 /// OS reports as busy. Returns `(resolved, note)`.
 fn allocate_one(preferred: u16, taken: &HashSet<u16>) -> Result<(u16, Option<String>)> {
@@ -117,6 +171,37 @@ pub fn allocate(ordered: &[ServiceConfig], reserved: &HashSet<u16>) -> Result<Al
     let mut plan: Vec<PortPlanEntry> = Vec::new();
 
     for svc in ordered {
+        // A port is a HARD PIN when Harbor can't relocate it: either the command
+        // names a literal port flag, or the service doesn't consume `${PORT}` (so
+        // it binds its own fixed port). Pinning binds it as-is and never bumps —
+        // bumping would desync the plan / health probe / Open URL from the real
+        // bound port, which is exactly what crashed opal with EADDRINUSE.
+        let pin = pinned_port(&svc.command).or(match svc.port {
+            Some(p) if !injects_port(svc) => Some(p),
+            _ => None,
+        });
+        if let Some(p) = pin {
+            let why = if pinned_port(&svc.command).is_some() {
+                format!("command pins port {p}")
+            } else {
+                format!("fixed port {p} (command doesn't read ${{PORT}})")
+            };
+            let note = if taken.contains(&p) || !is_port_free(p) {
+                format!("{why} — in use, will adopt or report")
+            } else {
+                why
+            };
+            taken.insert(p);
+            ports.insert(svc.name.clone(), p);
+            plan.push(PortPlanEntry {
+                service: svc.name.clone(),
+                preferred: svc.port,
+                resolved: p,
+                note: Some(note),
+            });
+            continue;
+        }
+
         let Some(pref) = svc.port else { continue };
         let (resolved, note) = allocate_one(pref, &taken)?;
         taken.insert(resolved);
@@ -237,5 +322,65 @@ mod tests {
         let ports = Map::new();
         let out = resolve_placeholders("echo ${HOME}", None, &ports);
         assert_eq!(out, "echo ${HOME}");
+    }
+
+    #[test]
+    fn pinned_port_all_forms() {
+        assert_eq!(pinned_port("next dev -p 3002"), Some(3002));
+        assert_eq!(pinned_port("next dev --port 3002"), Some(3002));
+        assert_eq!(pinned_port("next dev -p=3002"), Some(3002));
+        assert_eq!(pinned_port("next dev --port=3002"), Some(3002));
+        assert_eq!(pinned_port("next dev -p3002"), Some(3002));
+        assert_eq!(pinned_port("some-server -P 8080"), Some(8080));
+        assert_eq!(pinned_port("npm run dev"), None);
+        // `${PORT}` is not a literal — Harbor still controls the port.
+        assert_eq!(pinned_port("vite --port ${PORT}"), None);
+    }
+
+    #[test]
+    fn allocate_pins_fixed_port_when_command_ignores_port() {
+        // `npm run dev` with no ${PORT} anywhere → Harbor can't relocate it, so
+        // the configured port is fixed and must NOT bump even when reserved.
+        let s = vec![svc_cmd("web", "npm run dev", Some(3002))];
+        let mut reserved = HashSet::new();
+        reserved.insert(3002u16);
+        let alloc = allocate(&s, &reserved).unwrap();
+        assert_eq!(alloc.ports.get("web"), Some(&3002u16));
+        assert!(alloc.plan[0].note.as_deref().unwrap().contains("fixed port"));
+    }
+
+    #[test]
+    fn allocate_bumps_relocatable_port() {
+        // Command consumes ${PORT} → relocatable → a taken preferred port bumps.
+        let s = vec![svc_cmd("web", "vite --port ${PORT}", Some(5000))];
+        let mut reserved = HashSet::new();
+        reserved.insert(5000u16);
+        let alloc = allocate(&s, &reserved).unwrap();
+        assert_ne!(alloc.ports.get("web"), Some(&5000u16));
+    }
+
+    #[test]
+    fn allocate_respects_pinned_port_over_bump() {
+        // Pinned 3002 must be reported as resolved=3002 even though `taken` holds
+        // it; it is never bumped.
+        let s = vec![svc_cmd("web", "next dev -p 3002", Some(9999))];
+        let mut reserved = HashSet::new();
+        reserved.insert(3002u16);
+        let alloc = allocate(&s, &reserved).unwrap();
+        assert_eq!(alloc.ports.get("web"), Some(&3002u16));
+        assert_eq!(alloc.plan[0].resolved, 3002);
+    }
+
+    fn svc_cmd(name: &str, command: &str, port: Option<u16>) -> ServiceConfig {
+        ServiceConfig {
+            name: name.into(),
+            cwd: ".".into(),
+            command: command.into(),
+            port,
+            env: Map::new(),
+            depends_on: vec![],
+            health_check: None,
+            ready_log_pattern: None,
+        }
     }
 }

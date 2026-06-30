@@ -410,6 +410,96 @@ body,
 .chip[data-tone="warn"] { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
 .chip[data-tone="danger"] { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); }
 
+/* Marks a service Harbor recovered from a prior session (no live log stream). */
+.adopted-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  cursor: default;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+/* The per-app "Auto-restart on crash" switch under the detail subtitle. */
+.auto-restart-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 7px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+}
+.auto-restart-toggle span {
+  cursor: default;
+}
+
+/* Restart icon spins while the restart is in flight. */
+.icon-btn .spin {
+  animation: harbor-spin 0.7s linear infinite;
+}
+@keyframes harbor-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Live CPU%/memory readout. tabular-nums prevents jitter as numbers change. */
+.svc-res {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.tray-res {
+  margin-right: 6px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Drag-a-folder-to-register overlay. */
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--content-bg));
+  border: 2px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 12px;
+  pointer-events: none;
+}
+
+/* Marks a service started OUTSIDE Harbor (amber, a sibling of .adopted-tag). */
+.external-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  cursor: default;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+}
+
 /* status badge */
 .badge {
   display: inline-flex;

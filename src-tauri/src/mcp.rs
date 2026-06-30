@@ -148,6 +148,12 @@ impl HarborMcp {
         Ok(out(json!({ "app": app, "stopped": true })))
     }
 
+    #[rmcp::tool(description = "Restart an app: stop it, then start it again under the same (or given) profile")]
+    async fn restart_app(&self, Parameters(StartArg { app, profile }): Parameters<StartArg>) -> Result<Json<JsonOut>, String> {
+        let snap = ops::restart_app(&self.state, &app, profile.as_deref()).await?;
+        Ok(out(serde_json::to_value(snap).map_err(|e| e.to_string())?))
+    }
+
     #[rmcp::tool(description = "Tail recent captured logs for a service")]
     async fn get_logs(&self, Parameters(LogsArg { app, service, lines }): Parameters<LogsArg>) -> Result<Json<JsonOut>, String> {
         let logs = self

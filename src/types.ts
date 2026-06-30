@@ -29,6 +29,8 @@ export interface AppConfig {
   root: string;
   services: ServiceConfig[];
   profiles: Record<string, string[]>;
+  /** Auto-restart Harbor-spawned services that crash (bounded). Default off. */
+  autoRestart?: boolean;
 }
 
 export interface ServiceRun {
@@ -38,6 +40,22 @@ export interface ServiceRun {
   port?: number;
   resolvedCommand?: string;
   exitCode?: number;
+  /** Re-adopted from a previous Harbor session: pid/port held, no live logs. */
+  adopted?: boolean;
+  /** Discovered running outside Harbor (started in a terminal, etc.). */
+  external?: boolean;
+  /** Recent group CPU% (ps pcpu). Present while live & sampled. */
+  cpu?: number;
+  /** Group resident memory, in bytes. */
+  memBytes?: number;
+}
+
+/** Element of the harbor://stats batch event. */
+export interface ServiceStat {
+  app: string;
+  service: string;
+  cpu: number;
+  memBytes: number;
 }
 
 export interface PortPlanEntry {

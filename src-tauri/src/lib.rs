@@ -37,6 +37,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         // Remember window size/position across launches. The tray popover is
         // excluded so it always starts hidden (its visibility is driven by the
         // tray icon, not restored state).
@@ -53,7 +54,9 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .expect("resolve app data dir");
-            let store = Store::new(&data_dir);
+            // Shared with the supervisor, which persists/reads `runs.json` to
+            // re-adopt servers left running by a previous session.
+            let store = Arc::new(Store::new(&data_dir));
 
             // --- registry: load, or seed QuizletLocal on first run ---
             let mut registry = store.load_registry().unwrap_or_default().apps;
@@ -92,9 +95,49 @@ pub fn run() {
             );
 
             // --- shared state, reachable from commands AND the MCP server ---
-            let supervisor = Supervisor::new(handle.clone());
-            let app_state = Arc::new(AppState::new(store, registry, supervisor, mcp.clone()));
+            // The registry is shared (Arc) with the supervisor so auto-restart
+            // reads live, possibly-edited config at crash time.
+            let registry = Arc::new(tokio::sync::RwLock::new(registry));
+            let supervisor = Supervisor::new(handle.clone(), store.clone(), registry.clone());
+            let app_state = Arc::new(AppState::new(store.clone(), registry, supervisor, mcp.clone()));
             app.manage(app_state.clone());
+
+            // Ask for notification permission up front (non-blocking) so crash
+            // alerts can fire later. Best-effort; denial degrades to in-app only.
+            {
+                use tauri_plugin_notification::{NotificationExt, PermissionState};
+                let h = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let granted = h
+                        .notification()
+                        .permission_state()
+                        .map(|s| s == PermissionState::Granted)
+                        .unwrap_or(false);
+                    if !granted {
+                        let _ = h.notification().request_permission();
+                    }
+                });
+            }
+
+            // Re-adopt any servers a previous session left running, before the
+            // window paints — so the UI shows them as running and a duplicate
+            // Start is short-circuited instead of crashing on EADDRINUSE.
+            {
+                let st = app_state.clone();
+                tauri::async_runtime::block_on(async move {
+                    // 1. Re-adopt servers this Harbor spawned in a prior session.
+                    st.supervisor.adopt_persisted().await;
+                    // 2. Reflect servers started OUTSIDE Harbor (e.g. a terminal)
+                    //    that corroborate as a registered app, so they show as
+                    //    running immediately.
+                    let configs = st.list_configs().await;
+                    st.supervisor.scan_and_adopt_external(&configs).await;
+                });
+            }
+
+            // Per-service resource sampler (group CPU% + RSS, ~2s). After adoption
+            // so adopted/external services are sampled too.
+            app_state.supervisor.spawn_sampler();
 
             // --- host the MCP server on Tauri's tokio runtime ---
             let server_state = app_state.clone();
@@ -143,7 +186,23 @@ pub fn run() {
             commands::connect_codex,
             commands::fix_prompt,
             commands::run_fix,
+            commands::restart_app,
+            commands::start_all,
+            commands::stop_all,
+            commands::path_kind,
+            commands::read_dotenv,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // On quit, flag the supervisor as shutting down so any in-flight
+            // auto-restart backoff / crash notification no-ops. We deliberately
+            // do NOT stop the servers — Harbor-spawned servers survive a Harbor
+            // restart and are re-adopted next launch (see adopt_persisted).
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+                    state.supervisor.begin_shutdown();
+                }
+            }
+        });
 }

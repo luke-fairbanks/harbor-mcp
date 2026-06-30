@@ -25,6 +25,44 @@ pub async fn stop_app(state: &AppState, app: &str) -> Result<(), String> {
     state.supervisor.stop(app).await.map_err(|e| e.to_string())
 }
 
+/// Stop then start an app. Re-derives the running profile if none is given, so a
+/// `dev` run restarts as `dev`. The stop phase sets the intentional-stop marker,
+/// so a Restart is never mistaken for a crash.
+pub async fn restart_app(
+    state: &AppState,
+    app: &str,
+    profile: Option<&str>,
+) -> Result<AppRunSnapshot, String> {
+    let profile = match profile {
+        Some(p) => Some(p.to_string()),
+        None => state.supervisor.snapshot(app).await.and_then(|s| s.profile),
+    };
+    stop_app(state, app).await?;
+    start_app(state, app, profile.as_deref()).await
+}
+
+/// Stop every running app (including servers started outside Harbor — the user
+/// wants their ports freed). Best-effort: a per-app failure never aborts the sweep.
+pub async fn stop_all(state: &AppState) -> Result<(), String> {
+    for cfg in state.list_configs().await {
+        if state.supervisor.is_running(&cfg.name).await {
+            let _ = state.supervisor.stop(&cfg.name).await;
+        }
+    }
+    Ok(())
+}
+
+/// Start every not-already-running app under its default profile, sequentially
+/// (to avoid a spawn storm). Best-effort.
+pub async fn start_all(state: &AppState) -> Result<(), String> {
+    for cfg in state.list_configs().await {
+        if !state.supervisor.is_running(&cfg.name).await {
+            let _ = state.supervisor.start(&cfg, "default").await;
+        }
+    }
+    Ok(())
+}
+
 /// Open the served URL of a running app. Picks the most "front-door" service
 /// that has a port: prefer `web`, then `server`, then any.
 pub async fn open_app(state: &AppState, app: &str) -> Result<String, String> {

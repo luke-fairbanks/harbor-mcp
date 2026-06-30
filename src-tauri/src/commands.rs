@@ -36,6 +36,9 @@ pub struct McpInfo {
 pub async fn list_apps(state: State<'_, Arc<AppState>>) -> Result<Vec<AppListItem>, String> {
     let mut out = Vec::new();
     for config in state.list_configs().await {
+        // Reflect a server started outside Harbor (e.g. a terminal) on this app's
+        // port; no-op + cheap when the app is already tracked as running.
+        state.supervisor.reflect_external_if_idle(&config).await;
         let run = state.supervisor.snapshot(&config.name).await;
         let running = state.supervisor.is_running(&config.name).await;
         out.push(AppListItem {
@@ -52,6 +55,9 @@ pub async fn app_status(
     state: State<'_, Arc<AppState>>,
     app: String,
 ) -> Result<Option<AppRunSnapshot>, String> {
+    if let Some(cfg) = state.get_config(&app).await {
+        state.supervisor.reflect_external_if_idle(&cfg).await;
+    }
     Ok(state.supervisor.snapshot(&app).await)
 }
 
@@ -67,6 +73,25 @@ pub async fn start_app(
 #[tauri::command]
 pub async fn stop_app(state: State<'_, Arc<AppState>>, app: String) -> Result<(), String> {
     ops::stop_app(&state, &app).await
+}
+
+#[tauri::command]
+pub async fn restart_app(
+    state: State<'_, Arc<AppState>>,
+    app: String,
+    profile: Option<String>,
+) -> Result<AppRunSnapshot, String> {
+    ops::restart_app(&state, &app, profile.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn start_all(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    ops::start_all(&state).await
+}
+
+#[tauri::command]
+pub async fn stop_all(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    ops::stop_all(&state).await
 }
 
 #[tauri::command]
@@ -148,7 +173,52 @@ pub async fn detect_app(path: String) -> Result<Detection, String> {
     if !p.exists() {
         return Err(format!("path does not exist: {path}"));
     }
+    if !p.is_dir() {
+        return Err(format!("not a folder: {path} — drop a project folder, not a file"));
+    }
     Ok(detect::detect(&p))
+}
+
+/// Classify a dropped path so the UI can resolve folder-vs-file without a throw.
+#[tauri::command]
+pub fn path_kind(path: String) -> &'static str {
+    let p = std::path::Path::new(&path);
+    if p.is_dir() {
+        "dir"
+    } else if p.is_file() {
+        "file"
+    } else {
+        "missing"
+    }
+}
+
+/// Parse a `.env` file into KEY→VALUE (handles `export `, `#` comments, and
+/// single/double-quoted values). Used by the env editor's "Import .env".
+#[tauri::command]
+pub fn read_dotenv(path: String) -> Result<BTreeMap<String, String>, String> {
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut out = BTreeMap::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        let l = l.strip_prefix("export ").unwrap_or(l);
+        if let Some((k, v)) = l.split_once('=') {
+            let k = k.trim();
+            if k.is_empty() {
+                continue;
+            }
+            let v = v.trim();
+            let v = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(v);
+            out.insert(k.to_string(), v.to_string());
+        }
+    }
+    Ok(out)
 }
 
 #[tauri::command]
