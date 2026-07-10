@@ -51,13 +51,14 @@ port allocation, watch resource usage, and read logs to debug.
 
 Download the **`.dmg`** from the
 [latest release](https://github.com/luke-fairbanks/harbor-mcp/releases), open it,
-and drag Harbor to Applications.
+and drag Harbor to Applications. Builds are signed and notarized, so it opens like
+any other app.
 
-**First launch:** Harbor currently ships **unsigned**, so macOS will say it "can't
-verify the developer." Open it once via **System Settings → Privacy & Security →
-Open Anyway** (or right-click the app → **Open**) — you only do this once.
-*(Maintainers can turn on Developer ID signing + notarization to remove this step
-for everyone; the pipeline is ready — see [`DISTRIBUTING.md`](./DISTRIBUTING.md).)*
+Or with Homebrew:
+
+```bash
+brew install --cask luke-fairbanks/tap/harbor
+```
 
 ## Build it yourself
 

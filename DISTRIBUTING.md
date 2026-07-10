@@ -94,27 +94,18 @@ npm run tauri build -- --target universal-apple-darwin
 The signed, notarized `.dmg` lands in
 `src-tauri/target/universal-apple-darwin/release/bundle/dmg/`.
 
-## Homebrew (optional, after the first release)
+## Homebrew (after each release)
 
-Create a tap repo `luke-fairbanks/homebrew-harbor` with `Casks/harbor.rb`:
+The cask lives in the shared tap
+[`luke-fairbanks/homebrew-tap`](https://github.com/luke-fairbanks/homebrew-tap)
+(`Casks/harbor.rb`, alongside Battery Hog's cask). After each release, bump
+`version` and `sha256` there:
 
-```ruby
-cask "harbor" do
-  version "0.1.0"
-  sha256 "REPLACE_WITH_DMG_SHA256"   # shasum -a 256 Harbor_0.1.0_universal.dmg
-
-  url "https://github.com/luke-fairbanks/harbor-mcp/releases/download/v#{version}/Harbor_#{version}_universal.dmg"
-  name "Harbor"
-  desc "One-button local dev server orchestration, MCP-native"
-  homepage "https://github.com/luke-fairbanks/harbor-mcp"
-
-  app "Harbor.app"
-
-  zap trash: ["~/Library/Application Support/com.harbor.desktop"]
-end
+```bash
+shasum -a 256 Harbor_<version>_universal.dmg
 ```
 
-Then anyone can `brew install --cask luke-fairbanks/harbor/harbor`.
+Anyone can then `brew install --cask luke-fairbanks/tap/harbor`.
 
 ## A note on entitlements
 
