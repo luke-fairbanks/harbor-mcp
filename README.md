@@ -96,7 +96,9 @@ Then ask your agent to `detect_app` a folder, `start_app` it, read `app_status` 
 - **Port plan** — what each service preferred vs. the port it actually got, and
   how dependents were rewired.
 
-## MCP tools
+## Tools
+
+The embedded MCP server exposes:
 
 | Tool | Purpose |
 |------|---------|
