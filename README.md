@@ -67,9 +67,10 @@ port allocation, watch resource usage, and read logs to debug.
 
 Download the **`.dmg`** from the
 [latest release](https://github.com/luke-fairbanks/harbor-mcp/releases), open it,
-and drag Harbor to Applications. Releases are signed and notarized when the
-maintainer's Apple signing secrets are enabled; the release notes identify an
-unsigned build and its one-time Gatekeeper step otherwise.
+and drag Harbor to Applications. Production releases are signed by Faba
+Development, notarized by Apple, and cryptographically verified by the release
+workflow. Starting with v0.4.0, Harbor checks for signed updates automatically;
+you can also check from **Settings → Harbor updates**.
 
 Or with Homebrew:
 
@@ -82,11 +83,11 @@ brew install --cask luke-fairbanks/tap/harbor
 ```bash
 npm install
 npm run tauri dev      # dev window + MCP server (prefers 127.0.0.1:7777)
-npm run tauri build    # produces a .app / .dmg (unsigned unless you set up signing)
+npm run tauri:build:local # produces a local .app / .dmg without updater artifacts
 ```
 
 Maintainers: see [`DISTRIBUTING.md`](./DISTRIBUTING.md) for code signing,
-notarization, and how to cut a release.
+notarization, updater keys, and how to cut a release.
 
 ## Connect your Claude (or Codex)
 

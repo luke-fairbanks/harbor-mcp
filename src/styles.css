@@ -122,6 +122,17 @@ button {
   -webkit-tap-highlight-color: transparent;
 }
 
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
 .radix-themes {
   background-color: transparent !important;
   --default-font-family: var(--font-ui);
@@ -369,6 +380,17 @@ button {
   text-align: center;
 }
 
+.sidebar-update-badge {
+  min-width: 0;
+  padding: 3px 6px;
+  border-radius: 7px;
+  color: #a9ddf8;
+  background: rgba(53, 168, 255, 0.14);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .sidebar-section-heading {
   display: flex;
   align-items: center;
@@ -389,6 +411,12 @@ button {
   min-height: 0;
   padding: 0 8px 10px;
   overflow-y: auto;
+}
+
+.sidebar-footer-nav {
+  flex: none;
+  padding-top: 9px;
+  border-top: 1px solid var(--sidebar-border);
 }
 
 .app-item {
@@ -2151,6 +2179,240 @@ span.server-port {
   max-height: 100px;
 }
 
+/* App settings and updates ---------------------------------------------- */
+
+.app-settings-page {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.app-settings-body {
+  max-width: 860px;
+}
+
+.settings-update-card {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--hair);
+  border-radius: var(--r-card);
+  background: var(--surface);
+}
+
+.settings-app-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: var(--r-control);
+  color: #fff;
+  background: #167fbd;
+}
+
+.settings-update-copy {
+  min-width: 0;
+}
+
+.settings-update-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.settings-update-title-row h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.settings-update-title-row span {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: var(--type-caption);
+}
+
+.settings-update-copy p,
+.settings-update-copy small {
+  display: block;
+  margin: 4px 0 0;
+  color: var(--text-3);
+  font-size: var(--type-caption);
+  line-height: 1.45;
+}
+
+.settings-update-copy small {
+  color: var(--danger);
+}
+
+.settings-update-action {
+  min-width: 132px;
+  justify-content: center !important;
+}
+
+.settings-signature-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: 680px;
+  color: var(--text-3);
+  font-size: var(--type-caption);
+  line-height: 1.5;
+}
+
+.settings-signature-note svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.settings-signature-note p {
+  margin: 0;
+}
+
+.update-notice {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 60;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 11px;
+  width: min(370px, calc(100% - 36px));
+  padding: 14px;
+  border: 1px solid var(--hair-2);
+  border-radius: var(--r-card);
+  color: var(--text);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-float);
+}
+
+.update-notice[data-phase="error"] {
+  border-color: rgba(218, 81, 88, 0.25);
+}
+
+.update-notice-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-control);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.update-notice[data-phase="upToDate"] .update-notice-icon,
+.update-notice[data-phase="restartRequired"] .update-notice-icon {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.update-notice[data-phase="error"] .update-notice-icon {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.update-notice-content {
+  min-width: 0;
+}
+
+.update-notice-content > strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.update-notice-content > p {
+  display: -webkit-box;
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: var(--type-caption);
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.update-notice-content > small {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.update-notice-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 11px;
+}
+
+.update-progress {
+  position: relative;
+  height: 4px;
+  margin-top: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-inset);
+}
+
+.update-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width var(--dur) var(--ease-out);
+}
+
+.update-progress[data-indeterminate="true"] > span {
+  animation: update-progress-indeterminate 1.15s ease-in-out infinite alternate;
+}
+
+.update-error-details {
+  margin-top: 8px;
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+.update-error-details summary {
+  width: max-content;
+  cursor: pointer;
+  user-select: none;
+}
+
+.update-error-details code {
+  display: block;
+  max-height: 74px;
+  margin-top: 6px;
+  padding: 7px 8px;
+  overflow: auto;
+  border-radius: 6px;
+  color: var(--text-2);
+  background: var(--surface-inset);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+@keyframes update-progress-indeterminate {
+  from {
+    transform: translateX(-85%);
+  }
+  to {
+    transform: translateX(290%);
+  }
+}
+
 /* Dialogs, registration and config -------------------------------------- */
 
 .rt-DialogContent,
@@ -2714,6 +2976,18 @@ summary:focus-visible,
   .connections-config-grid,
   .config-grid {
     grid-template-columns: 1fr;
+  }
+  .settings-update-card {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+  .settings-update-action {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+  .update-notice {
+    right: 12px;
+    bottom: 12px;
+    width: calc(100% - 24px);
   }
   .register-footer {
     align-items: flex-end;

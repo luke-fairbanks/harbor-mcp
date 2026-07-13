@@ -22,6 +22,8 @@ duplicates, and safely operate a project without becoming a server expert.
   startup, and reserved-socket MCP startup.
 - Structural config validation, atomic rename/update, per-app start serialization,
   and hydration of logs emitted before the UI subscribed.
+- Developer ID signing, Apple notarization, signed in-app updates with automatic
+  and manual checks, progress feedback, and fail-closed release verification.
 
 ## Next: release-quality safety and distribution
 
@@ -36,10 +38,9 @@ duplicates, and safely operate a project without becoming a server expert.
    in the editor, redact logs/MCP/AI-fix prompts, and export `.env.example` keys
    rather than literal values.
 
-3. **Signed updater and diagnostics**
-   Notarize releases, add Tauri's signed updater, and ship an About/Diagnostics
-   screen that checks runtimes, the MCP endpoint, filesystem permissions, and
-   client connections without exposing tokens.
+3. **Diagnostics**
+   Ship a diagnostics screen that checks runtimes, the MCP endpoint, filesystem
+   permissions, update status, and client connections without exposing tokens.
 
 4. **Approval and audit history**
    Expand the current trust gate into command/config fingerprints, change diffs,

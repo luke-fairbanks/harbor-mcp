@@ -48,6 +48,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Remember window size/position across launches. The tray popover is
         // excluded so it always starts hidden (its visibility is driven by the
         // tray icon, not restored state).

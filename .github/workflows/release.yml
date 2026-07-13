@@ -2,11 +2,10 @@ name: Release
 
 # Cut a release by pushing a version tag that matches the version in
 # src-tauri/tauri.conf.json, e.g.:
-#   git tag v0.2.1 && git push origin v0.2.1
+#   git tag v0.4.0 && git push origin v0.4.0
 # Builds a UNIVERSAL (Intel + Apple Silicon) .dmg and attaches it to a draft
-# GitHub Release. If the Apple signing secrets are configured (see
-# DISTRIBUTING.md) the build is code-signed + notarized; otherwise it ships
-# unsigned (users do a one-time "Open Anyway"). Same tag flow either way.
+# GitHub Release. Production releases fail closed unless both Apple/Faba and
+# Tauri updater signing credentials are present (see DISTRIBUTING.md).
 
 on:
   push:
@@ -20,15 +19,27 @@ jobs:
   release:
     runs-on: macos-latest # Apple Silicon runner; we cross-compile a universal binary
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify release tag belongs to main
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          commit=$(git rev-parse "$GITHUB_SHA^{commit}")
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "::error::Release tags must point to a commit on main."
+            exit 1
+          fi
 
       - name: Install Rust (with both macOS targets for a universal build)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
+          toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           cache: npm
@@ -39,12 +50,26 @@ jobs:
           const fs = require("fs");
           const tag = process.env.GITHUB_REF_NAME.replace(/^v/, "");
           const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
-          const packageLock = JSON.parse(fs.readFileSync("package-lock.json", "utf8")).version;
+          const packageLockJson = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
+          const packageLock = packageLockJson.version;
+          const packageLockRoot = packageLockJson.packages?.[""]?.version;
           const tauri = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
           const cargoText = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
           const cargo = cargoText.match(/^version = "([^"]+)"/m)?.[1];
-          const versions = { tag, package: pkg, packageLock, tauri, cargo };
-          if (!cargo || new Set(Object.values(versions)).size !== 1) {
+          const cargoLockText = fs.readFileSync("src-tauri/Cargo.lock", "utf8");
+          const cargoLock = cargoLockText.match(
+            /\[\[package\]\]\nname = "harbor"\nversion = "([^"]+)"/,
+          )?.[1];
+          const versions = {
+            tag,
+            package: pkg,
+            packageLock,
+            packageLockRoot,
+            tauri,
+            cargo,
+            cargoLock,
+          };
+          if (!cargo || !cargoLock || new Set(Object.values(versions)).size !== 1) {
             console.error("Release version mismatch:", versions);
             process.exit(1);
           }
@@ -55,7 +80,9 @@ jobs:
         run: npm ci
 
       - name: Verify frontend
-        run: npm run build
+        run: |
+          npm test
+          npm run build
 
       - name: Verify Retina DMG background
         run: |
@@ -75,7 +102,7 @@ jobs:
 
       - name: Lint Rust core
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Verify Rust core and MCP tests
         working-directory: src-tauri
@@ -86,24 +113,62 @@ jobs:
           awk '/^const MCP_BRIDGE_SCRIPT:/{on=1; next} on && /^"#;/{exit} on {print}' \
             src-tauri/src/commands.rs | sh -n
 
-      # Decide signed-vs-unsigned WITHOUT leaving an empty APPLE_CERTIFICATE in
-      # the build env — an empty-but-present var makes Tauri try (and fail) to sign.
-      - name: Detect signing secrets
-        id: signing
+      - name: Verify release signing secrets
         env:
-          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          if [ -n "$CERT" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No Apple signing secrets — building an UNSIGNED .dmg."
-          fi
+          missing=0
+          for name in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_SIGNING_IDENTITY \
+            KEYCHAIN_PASSWORD \
+            APPLE_ID \
+            APPLE_PASSWORD \
+            APPLE_TEAM_ID \
+            TAURI_SIGNING_PRIVATE_KEY \
+            TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required release secret: $name"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
 
-      # --- Signed + notarized build (Apple secrets present) ---
+      - name: Generate release notes
+        id: release_notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          target_commitish=$(git rev-parse "$GITHUB_SHA^{commit}")
+          notes=$(gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$GITHUB_REF_NAME" \
+            -f target_commitish="$target_commitish" \
+            --jq .body)
+          delimiter="HARBOR_NOTES_$(uuidgen)"
+          {
+            echo "body<<$delimiter"
+            printf '%s\n' "$notes"
+            echo
+            echo "Universal macOS build for Intel and Apple Silicon."
+            echo
+            echo '**Install:** download the `.dmg`, open it, and drag Harbor to Applications.'
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build, sign, notarize, and publish
-        if: steps.signing.outputs.enabled == 'true'
-        uses: tauri-apps/tauri-action@v1
+        # Pin the action that receives Apple and updater signing credentials.
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -113,14 +178,15 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           args: --target universal-apple-darwin
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
           tagName: ${{ github.ref_name }}
           releaseName: "Harbor ${{ github.ref_name }}"
-          releaseBody: |
-            Universal macOS build (Intel + Apple Silicon).
-
-            **Install:** download the `.dmg`, open it, and drag Harbor to Applications.
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: true
           prerelease: false
 
@@ -128,7 +194,6 @@ jobs:
       # finished DMG as well so Gatekeeper can verify the exact outermost file
       # users download, including when their Mac is offline.
       - name: Notarize, staple, and replace signed DMG
-        if: steps.signing.outputs.enabled == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -150,21 +215,59 @@ jobs:
           spctl -a -vvv -t open --context context:primary-signature "$dmg"
           gh release upload "$GITHUB_REF_NAME" "$dmg" --clobber
 
-      # --- Unsigned build (no Apple secrets configured) ---
-      - name: Build and publish (unsigned)
-        if: steps.signing.outputs.enabled == 'false'
-        uses: tauri-apps/tauri-action@v1
+      - name: Verify updater metadata
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          args: --target universal-apple-darwin
-          tagName: ${{ github.ref_name }}
-          releaseName: "Harbor ${{ github.ref_name }}"
-          releaseBody: |
-            Universal macOS build (Intel + Apple Silicon).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          dir=$(mktemp -d)
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -e --arg tag "$GITHUB_REF_NAME" '
+                [.[] | select(.tag_name == $tag)] |
+                if length == 1 then .[0] else error("release not found or duplicated") end
+              ' > "$dir/release.json"
 
-            **Install:** download the `.dmg`, open it, and drag Harbor to Applications.
-            macOS will say it can't verify the developer (this build is unsigned) —
-            open it once via **System Settings → Privacy & Security → Open Anyway**.
-          releaseDraft: true
-          prerelease: false
+          archive="$dir/Harbor_${version}_universal.app.tar.gz"
+          signature_file="$archive.sig"
+          for name in latest.json "$(basename "$archive")" "$(basename "$signature_file")"; do
+            asset_id=$(jq -er --arg name "$name" \
+              '.assets[] | select(.name == $name) | .id' "$dir/release.json")
+            gh api -H "Accept: application/octet-stream" \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$dir/$name"
+            test -s "$dir/$name"
+          done
+
+          signature=$(tr -d '\r\n' < "$signature_file")
+          archive_url=$(jq -er --arg name "$(basename "$archive")" \
+            '.assets[] | select(.name == $name) | .url' "$dir/release.json")
+
+          jq -e \
+            --arg version "$version" \
+            --arg signature "$signature" \
+            --arg archive_url "$archive_url" '
+            . as $release |
+            ($release.version == $version) and
+            ([
+              "darwin-aarch64-app",
+              "darwin-x86_64-app",
+              "darwin-aarch64",
+              "darwin-x86_64"
+            ] | all(
+              . as $target |
+              ($release.platforms[$target].signature == $signature) and
+              ($release.platforms[$target].url == $archive_url)
+            ))
+          ' "$dir/latest.json"
+
+          cargo run --locked \
+            --manifest-path src-tauri/Cargo.toml \
+            --example verify_update_signature \
+            -- "$archive" "$signature_file" \
+            "$(jq -r '.plugins.updater.pubkey' src-tauri/tauri.conf.json)"
+
+          mkdir "$dir/extracted"
+          tar -xzf "$archive" -C "$dir/extracted"
+          app="$dir/extracted/Harbor.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl -a -vvv -t execute "$app"
+          xcrun stapler validate "$app"

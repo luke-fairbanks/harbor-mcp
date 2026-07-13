@@ -162,7 +162,7 @@ function ConnectCard({
   );
 }
 
-export function SettingsPanel({
+export function ConnectionsPanel({
   onAgentsChanged,
 }: {
   onAgentsChanged?: () => void;

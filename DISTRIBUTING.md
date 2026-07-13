@@ -5,17 +5,18 @@ the Mac App Store (the App Sandbox forbids exactly what Harbor does). The right
 path — the same one OrbStack, Docker Desktop, Warp, etc. use — is a **Developer
 ID–signed, Apple-notarized** build distributed directly (DMG + GitHub Releases).
 
-The [`Release` workflow](.github/workflows/release.yml) does the build, signing,
-notarization, and release automatically when you push a version tag. You just do
-the one-time credential setup below.
+The [`Release` workflow](.github/workflows/release.yml) builds, signs, notarizes,
+and verifies each release when a version tag is pushed. Production releases are
+fail-closed: Harbor will not publish an unsigned Apple build or an updater
+artifact without its cryptographic signature.
 
-> **Signing is optional.** Notarization is *not* the App Store — it's a free Apple
-> malware scan that removes the Gatekeeper warning, and it needs the $99/yr
-> Developer ID. If you skip all of it, the **same workflow still produces a working
-> unsigned `.dmg`** — just push a tag without adding any `APPLE_*` secrets. Users
-> then click through a one-time *System Settings → Privacy & Security → Open Anyway*
-> on first launch, which is normal for an open-source dev tool. Add the secrets
-> later to upgrade to a notarized build with zero rework.
+Harbor checks for updates shortly after launch and every six hours. It downloads
+only artifacts signed by Harbor's updater key, then macOS independently verifies
+Faba Development's Developer ID signature and notarization. Users can also check
+manually from **Settings → Harbor updates**.
+
+> Harbor v0.3.0 and earlier do not contain the updater. Those users must install
+> v0.4.0 manually once. Every signed release after that can update in-app.
 
 ---
 
@@ -35,7 +36,7 @@ install.)
 
 | Value | How to get it |
 |---|---|
-| **`APPLE_SIGNING_IDENTITY`** | Run `security find-identity -v -p codesigning` and copy the full quoted name, e.g. `Developer ID Application: Luke Fairbanks (ABCDE12345)`. |
+| **`APPLE_SIGNING_IDENTITY`** | Run `security find-identity -v -p codesigning` and copy the full quoted name, e.g. `Developer ID Application: Faba Development LLC (M58C5Q8BJC)`. |
 | **`APPLE_TEAM_ID`** | The 10-character Team ID from [developer.apple.com/account](https://developer.apple.com/account) → Membership. (Also the part in parentheses above.) |
 | **`APPLE_ID`** | Your Apple Developer account email. |
 | **`APPLE_PASSWORD`** | An **app-specific password** (not your real password): [account.apple.com](https://account.apple.com) → Sign-In & Security → App-Specific Passwords → ＋. Looks like `abcd-efgh-ijkl-mnop`. |
@@ -46,7 +47,32 @@ install.)
 > These are secrets. Don't commit them or paste them anywhere but GitHub's
 > encrypted secrets UI (below). Notarization is free; only the membership costs.
 
-## 3. Add them as GitHub Actions secrets
+## 3. Create and protect the updater key
+
+Generate this key once. Losing or replacing it prevents existing Harbor installs
+from trusting future updates.
+
+```bash
+password=$(openssl rand -base64 32)
+npm run tauri -- signer generate \
+  --write-keys ~/.tauri/harbor-updater.key \
+  --password "$password"
+```
+
+- Back up `~/.tauri/harbor-updater.key` and its password in separate secure
+  locations. Never commit either one.
+- Put the complete contents of `harbor-updater.key` in the
+  `TAURI_SIGNING_PRIVATE_KEY` GitHub secret.
+- Put its password in `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+- Put the complete contents of `harbor-updater.key.pub` in
+  `plugins.updater.pubkey` in `src-tauri/tauri.conf.json`. The public key is safe
+  to commit.
+
+The current Faba Development updater key is backed up in the macOS login
+Keychain under `Harbor Updater Private Key` and `Harbor Updater Signing`, and in
+the two GitHub Actions secrets above.
+
+## 4. Add the Apple credentials as GitHub Actions secrets
 
 Repo → **Settings → Secrets and variables → Actions → New repository secret** —
 add one for each name in the table above (exact names matter):
@@ -56,18 +82,35 @@ APPLE_SIGNING_IDENTITY   APPLE_TEAM_ID   APPLE_ID   APPLE_PASSWORD
 APPLE_CERTIFICATE   APPLE_CERTIFICATE_PASSWORD   KEYCHAIN_PASSWORD
 ```
 
-## 4. Cut a release
+The release workflow requires all seven Apple values plus both updater values.
+It stops before the build if any one is missing.
 
-Keep the tag in sync with `version` in `src-tauri/tauri.conf.json`, then push it:
+## 5. Cut a release
+
+Update the version in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`,
+`src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`. Commit that change to
+`main`, then push a matching annotated tag:
 
 ```bash
-git tag v0.2.1
-git push origin v0.2.1
+git switch main
+git pull --ff-only
+git tag -a v0.4.0 -m "Harbor v0.4.0"
+git push origin v0.4.0
 ```
 
-The workflow builds a universal `.dmg`, signs + notarizes it, and creates a
-**draft** GitHub Release with the `.dmg` attached. Review it and click *Publish*.
-(To auto-publish instead, set `releaseDraft: false` in the workflow.)
+Tags not reachable from `origin/main` are rejected. The workflow runs the full
+frontend and Rust test suites, builds a universal app, signs and notarizes the
+app and DMG, and creates a **draft** GitHub Release containing:
+
+- `Harbor_<version>_universal.dmg` for manual installation;
+- `Harbor_<version>_universal.app.tar.gz` and `.sig` for in-app updates;
+- `latest.json`, mapping both Intel and Apple Silicon Macs to the universal
+  updater artifact.
+
+The final verification step checks the updater signature, Apple signature,
+Gatekeeper acceptance, and notarization ticket. Publish the draft only after the
+workflow is green. GitHub's `/releases/latest/download/latest.json` endpoint then
+becomes the live update feed.
 
 Verify a downloaded build locally if you want:
 
@@ -78,21 +121,37 @@ xcrun stapler validate /path/to/Harbor.app
 
 ---
 
-## Building a signed `.dmg` locally (no CI)
+## Local builds
+
+A normal local package does not need the updater private key:
+
+```bash
+npm run tauri:build:local
+```
+
+That override deliberately disables updater artifact creation while retaining
+the normal app/DMG bundle. Development builds never perform automatic update
+checks.
+
+To reproduce the full signed release locally, load both signing systems:
 
 With the cert in your login keychain:
 
 ```bash
-export APPLE_SIGNING_IDENTITY="Developer ID Application: Luke Fairbanks (ABCDE12345)"
+export APPLE_SIGNING_IDENTITY="Developer ID Application: Faba Development LLC (M58C5Q8BJC)"
 export APPLE_ID="you@example.com"
 export APPLE_PASSWORD="abcd-efgh-ijkl-mnop"
-export APPLE_TEAM_ID="ABCDE12345"
+export APPLE_TEAM_ID="M58C5Q8BJC"
+export TAURI_SIGNING_PRIVATE_KEY="$(<~/.tauri/harbor-updater.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(security find-generic-password \
+  -a "$USER" -s 'Harbor Updater Signing' -w)"
 
-npm run tauri build -- --target universal-apple-darwin
+npm run tauri -- build --target universal-apple-darwin
 ```
 
 The signed, notarized `.dmg` lands in
-`src-tauri/target/universal-apple-darwin/release/bundle/dmg/`.
+`src-tauri/target/universal-apple-darwin/release/bundle/dmg/`; the signed updater
+archive and `.sig` land beside `Harbor.app` under `bundle/macos/`.
 
 ## Homebrew (after each release)
 

@@ -3,9 +3,11 @@ import { DropdownMenu, Tooltip } from "@radix-ui/themes";
 import {
   DashboardIcon,
   DotsHorizontalIcon,
+  GearIcon,
   GlobeIcon,
   Link2Icon,
   PlusIcon,
+  UpdateIcon,
 } from "@radix-ui/react-icons";
 import { api, onLog, onRegistry, onSelect, onStats, onStatus } from "./api";
 import type {
@@ -17,7 +19,8 @@ import type {
 } from "./types";
 import { StatusDot, aggregateStatus } from "./components/StatusDot";
 import { AppDetail } from "./components/AppDetail";
-import { SettingsPanel } from "./components/SettingsPanel";
+import { ConnectionsPanel } from "./components/ConnectionsPanel";
+import { AppSettingsPanel } from "./components/AppSettingsPanel";
 import { LocalServersPanel } from "./components/LocalServersPanel";
 import { OverviewPanel } from "./components/OverviewPanel";
 import { RegisterDialog } from "./components/RegisterDialog";
@@ -25,6 +28,8 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { AnchorMark, ProjectGlyph } from "./components/icons";
 import { useFolderDrop } from "./useDragDrop";
 import { startWindowDrag } from "./titlebar";
+import { UpdateNotice } from "./components/UpdateNotice";
+import { useAppUpdater } from "./useAppUpdater";
 
 const LOG_CAP = 4000;
 
@@ -33,9 +38,9 @@ export default function App() {
   const [live, setLive] = useState<Record<string, AppRunSnapshot>>({});
   const [logs, setLogs] = useState<Record<string, LogLine[]>>({});
   const [selected, setSelected] = useState<string | null>(null);
-  const [view, setView] = useState<"overview" | "app" | "servers" | "settings">(
-    "overview",
-  );
+  const [view, setView] = useState<
+    "overview" | "app" | "servers" | "connections" | "settings"
+  >("overview");
   const [registerOpen, setRegisterOpen] = useState(false);
   const [agents, setAgents] = useState<AgentStatus | null>(null);
   const [confirmStopAll, setConfirmStopAll] = useState(false);
@@ -47,6 +52,7 @@ export default function App() {
   const listRequestGeneration = useRef(0);
   const requestSequence = useRef(0);
   const lastAppliedSequence = useRef<Record<string, number>>({});
+  const updater = useAppUpdater();
 
   const dragging = useFolderDrop(async (path) => {
     const kind = await api.pathKind(path);
@@ -300,6 +306,20 @@ export default function App() {
               >
                 Stop all running projects
               </DropdownMenu.Item>
+              <DropdownMenu.Separator />
+              <DropdownMenu.Item
+                disabled={
+                  updater.state.phase === "checking" ||
+                  updater.state.phase === "downloading" ||
+                  updater.state.phase === "installing" ||
+                  updater.state.phase === "relaunching" ||
+                  updater.state.phase === "restartRequired"
+                }
+                onSelect={() => void updater.checkForUpdates(true)}
+              >
+                <UpdateIcon />
+                Check for updates
+              </DropdownMenu.Item>
             </DropdownMenu.Content>
           </DropdownMenu.Root>
         </div>
@@ -325,9 +345,9 @@ export default function App() {
           </button>
           <button
             className="sidebar-nav-item"
-            data-active={view === "settings"}
-            aria-current={view === "settings" ? "page" : undefined}
-            onClick={() => setView("settings")}
+            data-active={view === "connections"}
+            aria-current={view === "connections" ? "page" : undefined}
+            onClick={() => setView("connections")}
           >
             <Link2Icon />
             <span>AI connections</span>
@@ -407,6 +427,21 @@ export default function App() {
             );
           })}
         </nav>
+
+        <nav className="sidebar-nav sidebar-footer-nav" aria-label="Settings">
+          <button
+            className="sidebar-nav-item"
+            data-active={view === "settings"}
+            aria-current={view === "settings" ? "page" : undefined}
+            onClick={() => setView("settings")}
+          >
+            <GearIcon />
+            <span>Settings</span>
+            {updater.state.phase === "available" && (
+              <span className="sidebar-update-badge">Update</span>
+            )}
+          </button>
+        </nav>
       </aside>
 
       <main className="harbor-detail">
@@ -424,8 +459,10 @@ export default function App() {
               }}
               onAddProject={() => setRegisterOpen(true)}
             />
+          ) : view === "connections" ? (
+            <ConnectionsPanel onAgentsChanged={refreshAgents} />
           ) : view === "settings" ? (
-            <SettingsPanel onAgentsChanged={refreshAgents} />
+            <AppSettingsPanel updater={updater} />
           ) : view === "servers" ? (
             <LocalServersPanel
               onOpenApp={(name) => {
@@ -462,6 +499,7 @@ export default function App() {
             />
           )}
         </section>
+        <UpdateNotice updater={updater} />
       </main>
 
       <RegisterDialog
