@@ -421,6 +421,7 @@ button {
   border: 1px solid rgba(92, 196, 217, 0.08);
   border-radius: 10px;
   background: var(--sidebar-selected);
+  pointer-events: none;
 }
 
 .app-sel::before {
@@ -434,7 +435,7 @@ button {
   background: #42c7df;
 }
 
-.app-item > * {
+.app-item > :not(.app-sel) {
   position: relative;
   z-index: 1;
 }
