@@ -61,8 +61,8 @@ APPLE_CERTIFICATE   APPLE_CERTIFICATE_PASSWORD   KEYCHAIN_PASSWORD
 Keep the tag in sync with `version` in `src-tauri/tauri.conf.json`, then push it:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The workflow builds a universal `.dmg`, signs + notarizes it, and creates a
@@ -115,3 +115,29 @@ servers it spawns run as their own processes, and the webview's JIT runs in
 Apple's own already-signed WebKit process. If a future notarization run ever
 flags something, add an `entitlements` plist and point `bundle.macOS.entitlements`
 at it — but you almost certainly won't need to.
+
+## MCP distribution behavior
+
+Harbor's Streamable-HTTP server is part of the signed app and binds only to
+loopback. During startup it reserves the selected socket before the UI and agent
+configuration advertise it, eliminating the old port check/bind race.
+
+- Harbor's one-click setup for Codex, Claude Code, and Claude Desktop writes an
+  owner-only launcher beside `mcp.json`. The launcher reads the current protected
+  port/per-launch token at each client start, opens Harbor quietly if needed,
+  and then runs the pinned `mcp-remote@0.1.38` adapter. Native HTTP configuration remains
+  available for advanced/manual setups, but requires Harbor to be open and must
+  be refreshed after each Harbor restart.
+- Harbor is single-instance: launching it again focuses the existing window
+  instead of allowing two processes to race the endpoint descriptor.
+- App data is `0700`; `mcp.json`, registry/run state, agent configs, and Harbor's
+  safety backups are written atomically as `0600`.
+- Client status is based on the current URL/token or launcher descriptor, not
+  merely the presence of an entry named `harbor`.
+
+The current restart-safe bridge used by Claude Code, Claude Desktop, and Codex
+still needs Node/npx and may need network on its first run. Manual native HTTP
+configuration avoids that dependency but requires Harbor to be open and the
+client entry to match its current port. A future fully offline release should
+replace the bridge with a signed Rust stdio sidecar bundled inside `Harbor.app`;
+see `ROADMAP.md`.

@@ -45,6 +45,8 @@ pub fn enriched_dirs() -> Vec<String> {
         }
         for p in [
             format!("{home}/.asdf/shims"),
+            format!("{home}/.volta/bin"),
+            format!("{home}/.local/share/mise/shims"),
             format!("{home}/.bun/bin"),
             format!("{home}/.local/bin"),
             format!("{home}/.cargo/bin"),

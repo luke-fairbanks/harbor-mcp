@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { DropdownMenu, Tooltip } from "@radix-ui/themes";
 import {
   CheckCircledIcon,
   DotsHorizontalIcon,
   GearIcon,
+  GlobeIcon,
   PlusIcon,
 } from "@radix-ui/react-icons";
 import { motion } from "framer-motion";
@@ -18,6 +19,7 @@ import type {
 import { StatusDot, aggregateStatus } from "./components/StatusDot";
 import { AppDetail } from "./components/AppDetail";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { LocalServersPanel } from "./components/LocalServersPanel";
 import { RegisterDialog } from "./components/RegisterDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { AnchorMark } from "./components/icons";
@@ -31,7 +33,7 @@ export default function App() {
   const [live, setLive] = useState<Record<string, AppRunSnapshot>>({});
   const [logs, setLogs] = useState<Record<string, LogLine[]>>({});
   const [selected, setSelected] = useState<string | null>(null);
-  const [view, setView] = useState<"app" | "settings">("app");
+  const [view, setView] = useState<"app" | "servers" | "settings">("app");
   const [registerOpen, setRegisterOpen] = useState(false);
   const [agents, setAgents] = useState<AgentStatus | null>(null);
   const [confirmStopAll, setConfirmStopAll] = useState(false);
@@ -40,6 +42,9 @@ export default function App() {
   );
   const [scanning, setScanning] = useState(false);
   const [dropError, setDropError] = useState<string | null>(null);
+  const listRequestGeneration = useRef(0);
+  const requestSequence = useRef(0);
+  const lastAppliedSequence = useRef<Record<string, number>>({});
 
   const dragging = useFolderDrop(async (path) => {
     const kind = await api.pathKind(path);
@@ -68,32 +73,78 @@ export default function App() {
   }, []);
 
   const refreshList = useCallback(async () => {
+    const generation = ++listRequestGeneration.current;
+    const request = ++requestSequence.current;
     const list = await api.listApps();
+    if (generation !== listRequestGeneration.current) return;
     setItems(list);
-    setLive((prev) => {
-      const next = { ...prev };
-      for (const it of list) if (it.run) next[it.config.name] = it.run;
+    setLive((previous) => {
+      const next: Record<string, AppRunSnapshot> = {};
+      for (const it of list) {
+        const name = it.config.name;
+        if (
+          request < (lastAppliedSequence.current[name] ?? 0) &&
+          previous[name]
+        ) {
+          next[name] = previous[name];
+          continue;
+        }
+        lastAppliedSequence.current[name] = request;
+        next[name] = it.run ?? {
+          app: name,
+          running: false,
+          services: [],
+          portPlan: [],
+        };
+      }
       return next;
     });
     setSelected((cur) =>
       cur && list.some((i) => i.config.name === cur)
         ? cur
-        : list[0]?.config.name ?? null,
+        : (list[0]?.config.name ?? null),
     );
   }, []);
 
-  const refreshApp = useCallback(async (app: string) => {
+  const refreshApp = useCallback(async (app: string, hydrate = false) => {
+    const request = ++requestSequence.current;
     const snap = await api.appStatus(app);
-    setLive((prev) => ({
-      ...prev,
-      [app]: snap ?? { app, running: false, services: [], portPlan: [] },
-    }));
+    if (request >= (lastAppliedSequence.current[app] ?? 0)) {
+      lastAppliedSequence.current[app] = request;
+      setLive((prev) => ({
+        ...prev,
+        [app]: snap ?? { app, running: false, services: [], portPlan: [] },
+      }));
+    }
+    if (hydrate && snap) {
+      const history = (
+        await Promise.all(
+          snap.services.map((service) => api.getLogs(app, service.name, 300)),
+        )
+      ).flat();
+      if (history.length > 0) {
+        setLogs((prev) => {
+          const merged = [...(prev[app] ?? []), ...history];
+          const unique = new Map(merged.map((line) => [line.seq, line]));
+          const ordered = [...unique.values()].sort((a, b) => a.seq - b.seq);
+          return { ...prev, [app]: ordered.slice(-LOG_CAP) };
+        });
+      }
+    }
   }, []);
 
   useEffect(() => {
     refreshList();
     refreshAgents();
   }, [refreshList, refreshAgents]);
+
+  // Hydrate early/adopted logs when an app is selected; live events alone miss
+  // output emitted before the detail view subscribed.
+  useEffect(() => {
+    if (view === "app" && selected) {
+      refreshApp(selected, true);
+    }
+  }, [view, selected, refreshApp]);
 
   useEffect(() => {
     let cancelled = false;
@@ -160,16 +211,23 @@ export default function App() {
 
   const claudeOn = !!(agents?.codeConnected || agents?.desktopConnected);
   const codexOn = !!agents?.codexConnected;
-  const connectedNames = [claudeOn ? "Claude" : null, codexOn ? "Codex" : null].filter(
-    Boolean,
-  ) as string[];
+  const connectedNames = [
+    claudeOn ? "Claude" : null,
+    codexOn ? "Codex" : null,
+  ].filter(Boolean) as string[];
   const agentsConnected = connectedNames.length > 0;
   const footLabel = agentsConnected
     ? `Connected to ${connectedNames.join(" & ")}`
-    : "Connect your Claude";
+    : "Connect an AI agent";
 
-  const runningCount = items.filter((i) => i.running).length;
-  const allRunning = items.length > 0 && runningCount === items.length;
+  const runningCount = items.filter(
+    (item) => live[item.config.name]?.running ?? item.running,
+  ).length;
+  const startableCount = items.filter(
+    (item) =>
+      item.config.trusted !== false &&
+      !(live[item.config.name]?.running ?? item.running),
+  ).length;
 
   async function doStartAll() {
     try {
@@ -183,6 +241,20 @@ export default function App() {
       await api.stopAll();
     } finally {
       refreshList();
+    }
+  }
+
+  async function registerDetectedPath(path: string) {
+    setPendingDetection(null);
+    setDropError(null);
+    setScanning(true);
+    setRegisterOpen(true);
+    try {
+      setPendingDetection(await api.detectApp(path));
+    } catch (e) {
+      setDropError(String(e));
+    } finally {
+      setScanning(false);
     }
   }
 
@@ -206,7 +278,10 @@ export default function App() {
           </span>
           <span className="row" style={{ gap: 2, flex: "none" }}>
             <Tooltip content="Register an app">
-              <button className="icon-btn" onClick={() => setRegisterOpen(true)}>
+              <button
+                className="icon-btn"
+                onClick={() => setRegisterOpen(true)}
+              >
                 <PlusIcon />
               </button>
             </Tooltip>
@@ -218,10 +293,10 @@ export default function App() {
               </DropdownMenu.Trigger>
               <DropdownMenu.Content size="1">
                 <DropdownMenu.Item
-                  disabled={allRunning || items.length === 0}
+                  disabled={startableCount === 0}
                   onSelect={doStartAll}
                 >
-                  Start all
+                  Start approved apps
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   color="red"
@@ -267,12 +342,29 @@ export default function App() {
                 )}
                 <StatusDot status={status} />
                 <span className="app-name">{name}</span>
-                {status !== "stopped" && (
-                  <span className="app-meta">{status}</span>
+                {it.config.trusted === false ? (
+                  <span className="app-meta" style={{ color: "var(--warn)" }}>
+                    review
+                  </span>
+                ) : (
+                  status !== "stopped" && (
+                    <span className="app-meta">{status}</span>
+                  )
                 )}
               </div>
             );
           })}
+        </div>
+
+        <div className="sidebar-section">Machine</div>
+        <div className="sidebar-machine">
+          <button
+            className="foot-btn"
+            data-active={view === "servers"}
+            onClick={() => setView("servers")}
+          >
+            <GlobeIcon /> Local servers
+          </button>
         </div>
 
         <div className="sidebar-foot">
@@ -290,6 +382,14 @@ export default function App() {
       <main className="harbor-detail">
         {view === "settings" ? (
           <SettingsPanel onAgentsChanged={refreshAgents} />
+        ) : view === "servers" ? (
+          <LocalServersPanel
+            onOpenApp={(name) => {
+              setSelected(name);
+              setView("app");
+            }}
+            onRegisterPath={registerDetectedPath}
+          />
         ) : selectedItem ? (
           <AppDetail
             key={selectedItem.config.name}
@@ -308,7 +408,19 @@ export default function App() {
         ) : (
           <div className="empty-state">
             <AnchorMark size={26} />
-            <div>Select an app, or click + to register one.</div>
+            <div className="empty-title">Bring a local project into Harbor</div>
+            <div className="empty-copy">
+              Drop its folder anywhere, or let Harbor scan it and propose the
+              right services, commands, and ports.
+            </div>
+            <div className="row" style={{ marginTop: 4 }}>
+              <button className="run-btn" onClick={() => setRegisterOpen(true)}>
+                <PlusIcon /> Add a project
+              </button>
+              <button className="fix-btn" onClick={() => setView("servers")}>
+                <GlobeIcon /> See what is already running
+              </button>
+            </div>
           </div>
         )}
       </main>

@@ -1,9 +1,11 @@
 [package]
 name = "harbor"
-version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+version = "0.2.0"
+description = "A trusted local development server control plane for people and AI agents"
+authors = ["Luke Fairbanks"]
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/luke-fairbanks/harbor-mcp"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -19,6 +21,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-window-state = "2"
@@ -33,4 +36,3 @@ rmcp = { version = "1.8", features = ["server", "macros", "transport-streamable-
 schemars = "1"
 uuid = { version = "1", features = ["v4"] }
 toml_edit = "0.22"
-

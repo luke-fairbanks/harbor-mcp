@@ -16,7 +16,8 @@ const SCAN_SPAN: u16 = 500;
 /// (Kahn's algorithm). Errors on cycles or references to unknown services.
 pub fn topo_sort(services: &[ServiceConfig]) -> Result<Vec<ServiceConfig>> {
     let names: HashSet<&str> = services.iter().map(|s| s.name.as_str()).collect();
-    let mut indegree: BTreeMap<&str, usize> = services.iter().map(|s| (s.name.as_str(), 0)).collect();
+    let mut indegree: BTreeMap<&str, usize> =
+        services.iter().map(|s| (s.name.as_str(), 0)).collect();
     let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
 
     for s in services {
@@ -129,11 +130,21 @@ pub fn injects_port(svc: &ServiceConfig) -> bool {
 /// services (Harbor chooses those only at allocation, so there's nothing stable
 /// to detect an external process against) and for portless services. This is the
 /// port external-process detection probes, so it matches what the app binds.
+#[allow(dead_code)] // retained as the authoritative hard-pin helper for callers/tests
 pub fn effective_port(svc: &ServiceConfig) -> Option<u16> {
     pinned_port(&svc.command).or(match svc.port {
         Some(p) if !injects_port(svc) => Some(p),
         _ => None,
     })
+}
+
+/// Port worth probing when looking for an already-running copy of a configured
+/// service. Unlike [`effective_port`], this intentionally includes a relocatable
+/// service's preferred port: an externally-started Vite/Next server normally
+/// still uses that default, and discovering it *before* allocation prevents
+/// Harbor from quietly starting a duplicate on the next port.
+pub fn discovery_port(svc: &ServiceConfig) -> Option<u16> {
+    pinned_port(&svc.command).or(svc.port)
 }
 
 /// Pick a concrete port for a preferred value, skipping `taken` and anything the
@@ -165,12 +176,36 @@ pub struct Allocation {
 
 /// Allocate ports for `ordered` services (already topo-sorted). `reserved` holds
 /// ports already claimed by other live Harbor runs, which we never reuse.
+#[allow(dead_code)] // convenience wrapper used by focused allocator tests
 pub fn allocate(ordered: &[ServiceConfig], reserved: &HashSet<u16>) -> Result<Allocation> {
+    allocate_with_claims(ordered, reserved, &BTreeMap::new())
+}
+
+/// Allocate while honoring services already corroborated as running outside
+/// Harbor. `claims` maps service name → its observed port. Those ports remain in
+/// the shared plan so `${services.X.port}` rewiring points at the existing
+/// process instead of a duplicate Harbor launch.
+pub fn allocate_with_claims(
+    ordered: &[ServiceConfig],
+    reserved: &HashSet<u16>,
+    claims: &BTreeMap<String, u16>,
+) -> Result<Allocation> {
     let mut taken = reserved.clone();
     let mut ports: BTreeMap<String, u16> = BTreeMap::new();
     let mut plan: Vec<PortPlanEntry> = Vec::new();
 
     for svc in ordered {
+        if let Some(&p) = claims.get(&svc.name) {
+            taken.insert(p);
+            ports.insert(svc.name.clone(), p);
+            plan.push(PortPlanEntry {
+                service: svc.name.clone(),
+                preferred: svc.port,
+                resolved: p,
+                note: Some("already running outside Harbor — reused".to_string()),
+            });
+            continue;
+        }
         // A port is a HARD PIN when Harbor can't relocate it: either the command
         // names a literal port flag, or the service doesn't consume `${PORT}` (so
         // it binds its own fixed port). Pinning binds it as-is and never bumps —
@@ -220,7 +255,11 @@ pub fn allocate(ordered: &[ServiceConfig], reserved: &HashSet<u16>) -> Result<Al
 /// Resolve `${PORT}` and `${services.<name>.port}` inside a string against the
 /// resolved-port map. `own` is this service's port (for bare `${PORT}`).
 /// Unknown placeholders are left untouched (e.g. `${HOME}` for the shell).
-pub fn resolve_placeholders(input: &str, own: Option<u16>, ports: &BTreeMap<String, u16>) -> String {
+pub fn resolve_placeholders(
+    input: &str,
+    own: Option<u16>,
+    ports: &BTreeMap<String, u16>,
+) -> String {
     // Tiny hand-rolled scanner — avoids a regex dependency for one pattern.
     let mut out = String::with_capacity(input.len());
     let bytes = input.as_bytes();
@@ -293,7 +332,10 @@ mod tests {
 
     #[test]
     fn topo_orders_deps_first() {
-        let s = vec![svc("web", Some(5173), &["api"]), svc("api", Some(4321), &[])];
+        let s = vec![
+            svc("web", Some(5173), &["api"]),
+            svc("api", Some(4321), &[]),
+        ];
         let ordered = topo_sort(&s).unwrap();
         assert_eq!(ordered[0].name, "api");
         assert_eq!(ordered[1].name, "web");
@@ -346,7 +388,11 @@ mod tests {
         reserved.insert(3002u16);
         let alloc = allocate(&s, &reserved).unwrap();
         assert_eq!(alloc.ports.get("web"), Some(&3002u16));
-        assert!(alloc.plan[0].note.as_deref().unwrap().contains("fixed port"));
+        assert!(alloc.plan[0]
+            .note
+            .as_deref()
+            .unwrap()
+            .contains("fixed port"));
     }
 
     #[test]
@@ -357,6 +403,16 @@ mod tests {
         reserved.insert(5000u16);
         let alloc = allocate(&s, &reserved).unwrap();
         assert_ne!(alloc.ports.get("web"), Some(&5000u16));
+    }
+
+    #[test]
+    fn external_claim_reuses_relocatable_preferred_port() {
+        let s = vec![svc_cmd("web", "vite --port ${PORT}", Some(5173))];
+        assert_eq!(discovery_port(&s[0]), Some(5173));
+        let claims = Map::from([("web".to_string(), 5173u16)]);
+        let alloc = allocate_with_claims(&s, &HashSet::new(), &claims).unwrap();
+        assert_eq!(alloc.ports.get("web"), Some(&5173));
+        assert!(alloc.plan[0].note.as_deref().unwrap().contains("reused"));
     }
 
     #[test]

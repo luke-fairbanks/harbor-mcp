@@ -33,6 +33,7 @@ use tokio::sync::{Mutex, RwLock};
 const RING_CAP: usize = 3000;
 const READY_TIMEOUT: Duration = Duration::from_secs(40);
 const STOP_GRACE: Duration = Duration::from_secs(5);
+const KILL_VERIFY_GRACE: Duration = Duration::from_secs(2);
 const HEALTH_POLL: Duration = Duration::from_millis(350);
 
 /// Auto-restart policy. A crash-on-start loop exhausts `RESTART_WINDOW_MAX`
@@ -76,6 +77,12 @@ pub struct Supervisor {
     registry: Registry,
     /// Per-(app,service) cooldown so a flapping service can't spam notifications.
     last_notified: Arc<Mutex<HashMap<(String, String), Instant>>>,
+    /// Serializes lifecycle entry for each app so simultaneous GUI/MCP starts
+    /// cannot both pass the initial running check and spawn duplicates.
+    lifecycle_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Serializes cross-app port planning until chosen ports are recorded in
+    /// `reserved`; per-app locks alone do not prevent two apps choosing 5173.
+    allocation_lock: Arc<Mutex<()>>,
     /// Flipped true on app quit; restart + notify paths no-op when set.
     shutting_down: Arc<AtomicBool>,
     /// Weak self-handle so a detached monitor task can call back into the
@@ -155,6 +162,43 @@ struct ProcFacts {
     started_at: String,
     /// Full argv of the process (contains the resolved command for the leader).
     command: String,
+}
+
+#[derive(Debug, Clone)]
+struct StopIdentity {
+    name: String,
+    pid: u32,
+    started_at: Option<String>,
+    port: Option<u16>,
+}
+
+/// Generation token captured by a monitor when it is spawned. Monitor tasks
+/// outlive individual run entries, so every delayed mutation must prove the
+/// `(app, service)` slot still contains this exact process generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MonitorIdentity {
+    pid: Option<u32>,
+    started_at: Option<String>,
+    adopted: bool,
+}
+
+impl MonitorIdentity {
+    fn matches(&self, service: &ServiceProc) -> bool {
+        service.pid == self.pid
+            && service.started_at == self.started_at
+            && service.adopted == self.adopted
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopPolicy {
+    /// The local UI may stop a process the person has explicitly seen and
+    /// confirmed, including a corroborated externally-started service.
+    AllowExternal,
+    /// Remote/control-plane callers may stop only Harbor-spawned processes.
+    /// The check is performed while holding the app lifecycle lock so adoption
+    /// cannot race between an out-of-lock preflight and signalling.
+    ManagedOnly,
 }
 
 /// `ps -o pid=,pgid=,lstart=,command= -p <pid>` → facts, or `None` if the pid is
@@ -238,7 +282,7 @@ fn still_ours(e: &PersistedRun) -> bool {
                 return false; // G4 neg: nothing is listening
             }
             match port_listener_pid(p) {
-                Some(lp) => lp == e.pid || ps_facts(lp).map_or(false, |g| g.pgid == e.pid),
+                Some(lp) => lp == e.pid || ps_facts(lp).is_some_and(|g| g.pgid == e.pid),
                 None => false,
             }
         }
@@ -250,9 +294,35 @@ fn still_ours(e: &PersistedRun) -> bool {
 /// signalled. Leader + start-time identity is the decisive guard.
 fn safe_to_signal(pid: u32, started_at: Option<&str>) -> bool {
     match ps_facts(pid) {
-        Some(f) => f.pgid == pid && started_at.map_or(true, |s| f.started_at == s),
+        Some(f) => f.pgid == pid && started_at.is_none_or(|s| f.started_at == s),
         None => false,
     }
+}
+
+/// Outcome verification is deliberately separate from signal authorization.
+/// An adopted process whose cwd no longer corroborates must not be signalled,
+/// but it is still a survivor and therefore prevents Harbor from claiming Stop
+/// succeeded or discarding its state.
+fn stop_identity_alive(identity: &StopIdentity) -> bool {
+    if let Some(facts) = ps_facts(identity.pid) {
+        return facts.pgid == identity.pid
+            && identity
+                .started_at
+                .as_deref()
+                .is_none_or(|started| facts.started_at == started);
+    }
+
+    // A process-group leader can exit before a listening grandchild. Retain the
+    // run conservatively while any member still reports the original pgid.
+    if !group_argv_lines(identity.pid).is_empty() {
+        return true;
+    }
+    // A child may daemonize into a new process group while retaining the port.
+    // Harbor must report that the server survived, but must not signal the new
+    // group without a fresh identity/corroboration pass.
+    identity
+        .port
+        .is_some_and(|port| port_listener_pid(port).is_some())
 }
 
 // ---- external-process detection (servers Harbor did NOT spawn) -------------
@@ -310,9 +380,52 @@ fn path_under(cwd: &str, root: &str) -> bool {
     !root.is_empty() && (cwd == root || cwd.starts_with(&format!("{root}/")))
 }
 
-/// The leader's argv names an interactive shell / login / multiplexer → refuse
-/// to adopt or signal (the kill-the-terminal guard). Applied only on the
-/// foreign path. Strips a login shell's leading `-` and takes the basename.
+/// Boundary-safe path corroboration inside an argv string. A raw substring is
+/// unsafe here: project `/x/app` must not claim `/x/app-old` (and later signal
+/// its process group). Descendants such as `/x/app/node_modules/vite` remain a
+/// match, as do quoted paths and `--cwd=/x/app`-style arguments.
+fn argv_mentions_path(argv: &str, path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    if path.is_empty() {
+        return false;
+    }
+
+    let before_boundary = |byte: Option<u8>| {
+        byte.is_none_or(|byte| {
+            byte.is_ascii_whitespace()
+                || matches!(byte, b'\'' | b'"' | b'=' | b':' | b',' | b';' | b'(')
+        })
+    };
+    let after_boundary = |byte: Option<u8>| {
+        byte.is_none_or(|byte| {
+            byte.is_ascii_whitespace()
+                || matches!(
+                    byte,
+                    b'/' | b'\\' | b'\'' | b'"' | b'=' | b':' | b',' | b';' | b')'
+                )
+        })
+    };
+
+    let mut from = 0;
+    while let Some(relative) = argv[from..].find(path) {
+        let start = from + relative;
+        let end = start + path.len();
+        let before = start
+            .checked_sub(1)
+            .and_then(|index| argv.as_bytes().get(index).copied());
+        let after = argv.as_bytes().get(end).copied();
+        if before_boundary(before) && after_boundary(after) {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+/// The leader's argv names an interactive shell, terminal, IDE, or coding agent
+/// host → refuse to adopt or signal. An externally-launched server may share
+/// that host's process group; killing it would otherwise take the user's agent
+/// or editor down too. Applied only on the foreign path.
 fn leader_is_shell(command: &str) -> bool {
     let base = command
         .split_whitespace()
@@ -323,11 +436,36 @@ fn leader_is_shell(command: &str) -> bool {
         .next()
         .unwrap_or("")
         .trim_end_matches(':'); // e.g. "sshd:" in "sshd: user@pts/1"
-    matches!(
+    let blocked_base = matches!(
         base,
-        "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh" | "login" | "tmux"
-            | "screen" | "sshd" | "mosh-server"
-    )
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "dash"
+            | "ksh"
+            | "tcsh"
+            | "csh"
+            | "login"
+            | "tmux"
+            | "screen"
+            | "sshd"
+            | "mosh-server"
+            | "codex"
+            | "claude"
+            | "cursor"
+            | "electron"
+            | "code"
+            | "zed"
+            | "warp"
+            | "terminal"
+            | "iterm2"
+    );
+    let lower = command.to_ascii_lowercase();
+    blocked_base
+        || lower.contains("claude-code")
+        || lower.contains("visual studio code")
+        || lower.contains("cursor.app")
+        || lower.contains("codex.app")
 }
 
 /// Walk an effective port → its LISTEN socket's pid → that process's group
@@ -374,7 +512,44 @@ fn group_belongs_to_app(leader_pid: u32, leader_cmd: &str, root: &str) -> bool {
     }
     // argv usually contains the root as the user typed it; accept either form.
     group_argv_lines(leader_pid).iter().any(|argv| {
-        argv.contains(root) || canon.as_deref().map_or(false, |c| argv.contains(c))
+        argv_mentions_path(argv, root)
+            || canon
+                .as_deref()
+                .is_some_and(|canonical| argv_mentions_path(argv, canonical))
+    })
+}
+
+/// Observation-only root corroboration for a listener. Unlike adoption this
+/// does not require a safely signalable group leader. It exists so a server
+/// sharing Codex/Claude/an IDE's process group still blocks a duplicate Harbor
+/// launch, while remaining monitor-only in the Local servers view.
+fn listener_belongs_to_app_observation(port: u16, root: &str) -> bool {
+    let Some(listener_pid) = port_listener_pid(port) else {
+        return false;
+    };
+    let root = root.trim_end_matches('/');
+    if root.is_empty() {
+        return false;
+    }
+    let canon = std::fs::canonicalize(root)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+    let matches_cwd =
+        |pid| pid_cwd(pid).is_some_and(|cwd| path_under(&cwd, canon.as_deref().unwrap_or(root)));
+    if matches_cwd(listener_pid) {
+        return true;
+    }
+    let Some(facts) = ps_facts(listener_pid) else {
+        return false;
+    };
+    if matches_cwd(facts.pgid) {
+        return true;
+    }
+    group_argv_lines(facts.pgid).iter().any(|argv| {
+        argv_mentions_path(argv, root)
+            || canon
+                .as_deref()
+                .is_some_and(|canonical| argv_mentions_path(argv, canonical))
     })
 }
 
@@ -401,6 +576,136 @@ fn adopted_signal_ok(pid: u32, started: Option<&str>, root: Option<&str>) -> boo
     }
 }
 
+/// Treat `:`, `-`, and `_` as part of a command atom. In particular, this keeps
+/// `npm run dev` from matching the different script `npm run dev:docs` while
+/// still recognizing framework names inside paths such as `node_modules/vite/`.
+fn command_boundary(byte: Option<u8>) -> bool {
+    byte.is_none_or(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b':')))
+}
+
+fn contains_boundary_phrase(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(relative) = haystack[from..].find(needle) {
+        let start = from + relative;
+        let end = start + needle.len();
+        if command_boundary(
+            start
+                .checked_sub(1)
+                .and_then(|i| haystack.as_bytes().get(i).copied()),
+        ) && command_boundary(haystack.as_bytes().get(end).copied())
+        {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+fn normalized_command_token(token: &str) -> String {
+    token
+        .trim_matches(|c: char| matches!(c, '\'' | '"' | ';' | ',' | '(' | ')'))
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn contains_token_sequence(observed: &str, configured: &[String]) -> bool {
+    if configured.is_empty() {
+        return false;
+    }
+    observed.lines().any(|line| {
+        let tokens: Vec<String> = line
+            .split_whitespace()
+            .map(normalized_command_token)
+            .collect();
+        tokens
+            .windows(configured.len())
+            .any(|window| window == configured)
+    })
+}
+
+/// Higher-confidence command corroboration used only by adoption/control. The
+/// inventory can remain suggestive, but Supervisor must not take ownership on a
+/// loose substring such as `dev` inside `dev:docs`.
+fn command_matches_for_adoption(configured: &str, observed: &str) -> bool {
+    // Keep discovery's broad framework/entry-point vocabulary as the first
+    // pass, then apply the stricter boundary checks below before ownership.
+    if !crate::discovery::command_matches(configured, observed) {
+        return false;
+    }
+    let configured_lower = configured.to_ascii_lowercase();
+    let observed_lower = observed.to_ascii_lowercase();
+    let configured_tokens: Vec<String> = configured_lower
+        .split_whitespace()
+        .take_while(|token| *token != "--")
+        .filter(|token| !token.contains("${"))
+        .map(normalized_command_token)
+        .filter(|token| !token.is_empty())
+        .collect();
+    let command_core = configured_tokens.join(" ");
+
+    if command_core.len() >= 5
+        && (contains_boundary_phrase(&observed_lower, &command_core)
+            || contains_token_sequence(&observed_lower, &configured_tokens))
+    {
+        return true;
+    }
+
+    let distinctive = [
+        "vite",
+        "next",
+        "nuxt",
+        "astro",
+        "svelte",
+        "remix",
+        "webpack",
+        "angular",
+        "uvicorn",
+        "fastapi",
+        "flask",
+        "django",
+        "manage.py",
+        "rails",
+        "gatsby",
+        "http.server",
+    ];
+    if distinctive.iter().any(|needle| {
+        contains_boundary_phrase(&configured_lower, needle)
+            && contains_boundary_phrase(&observed_lower, needle)
+    }) {
+        return true;
+    }
+
+    let configured_entries: HashSet<String> = configured_lower
+        .split_whitespace()
+        .map(normalized_command_token)
+        .filter(|token| {
+            token.len() > 3
+                && [".js", ".ts", ".py", ".rb"]
+                    .iter()
+                    .any(|suffix| token.ends_with(suffix))
+        })
+        .collect();
+    let observed_entries: HashSet<String> = observed_lower
+        .split_whitespace()
+        .map(normalized_command_token)
+        .collect();
+    !configured_entries.is_disjoint(&observed_entries)
+}
+
+fn service_log_ready_pattern(svc: &ServiceConfig) -> Option<String> {
+    svc.ready_log_pattern
+        .clone()
+        .or_else(|| match svc.health_check.as_ref() {
+            Some(HealthCheck::Log { pattern }) => Some(pattern.clone()),
+            _ => None,
+        })
+}
+
 /// Detect a server running on `port` that Harbor did not spawn but which is
 /// corroborated as `app`'s service. Returns a `foreign` [`PersistedRun`] keyed on
 /// the group **leader** (so `still_ours`/`killpg`/persistence all apply), or
@@ -410,12 +715,21 @@ fn adopted_signal_ok(pid: u32, started: Option<&str>, root: Option<&str>) -> boo
 fn detect_external(
     app: &str,
     svc_name: &str,
+    expected_command: &str,
     port: u16,
     root: &str,
     profile: Option<String>,
 ) -> Option<PersistedRun> {
     let (leader_pid, leader) = resolve_listener_leader(port)?;
     if !group_belongs_to_app(leader_pid, &leader.command, root) {
+        return None;
+    }
+    let observed = format!(
+        "{}\n{}",
+        leader.command,
+        group_argv_lines(leader_pid).join("\n")
+    );
+    if !command_matches_for_adoption(expected_command, &observed) {
         return None;
     }
     let rec = PersistedRun {
@@ -501,6 +815,8 @@ impl Supervisor {
             store,
             registry,
             last_notified: Arc::new(Mutex::new(HashMap::new())),
+            lifecycle_locks: Arc::new(Mutex::new(HashMap::new())),
+            allocation_lock: Arc::new(Mutex::new(())),
             shutting_down: Arc::new(AtomicBool::new(false)),
             me: me.clone(),
         })
@@ -590,6 +906,20 @@ impl Supervisor {
         let _ = self.app.emit(REGISTRY_EVENT, ());
     }
 
+    /// Acquire the same per-app lifecycle lock used by Start, Stop, discovery,
+    /// and auto-restart. Registry mutation surfaces use this to make their
+    /// `is_running` precondition atomic with the subsequent config write.
+    pub async fn lock_lifecycle(&self, app_name: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lifecycle = {
+            let mut locks = self.lifecycle_locks.lock().await;
+            locks
+                .entry(app_name.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        lifecycle.lock_owned().await
+    }
+
     pub async fn is_running(&self, app_name: &str) -> bool {
         self.runs
             .lock()
@@ -624,41 +954,233 @@ impl Supervisor {
         svc.logs.iter().skip(svc.logs.len() - n).cloned().collect()
     }
 
+    /// Stable identities currently represented by Supervisor state, used by the
+    /// machine-wide discovery view to distinguish observed from managed servers.
+    pub async fn tracked_servers(&self) -> Vec<crate::discovery::TrackedServer> {
+        let runs = self.runs.lock().await;
+        let mut tracked = Vec::new();
+        for (app, run) in runs.iter() {
+            for service in run.services.values() {
+                if !service.status.is_live() {
+                    continue;
+                }
+                if let Some(leader_pid) = service.pid {
+                    tracked.push(crate::discovery::TrackedServer {
+                        app: app.clone(),
+                        service: service.name.clone(),
+                        leader_pid,
+                        port: service.port,
+                        external: service.external,
+                    });
+                }
+            }
+        }
+        tracked
+    }
+
+    pub async fn owns_pid(&self, leader_pid: u32) -> bool {
+        self.runs.lock().await.values().any(|run| {
+            run.services
+                .values()
+                .any(|service| service.status.is_live() && service.pid == Some(leader_pid))
+        })
+    }
+
     /// Start an app under a profile. Idempotent: a no-op (returns current
     /// snapshot) if already running.
     pub async fn start(&self, cfg: &AppConfig, profile: &str) -> Result<AppRunSnapshot> {
-        if self.is_running(&cfg.name).await {
-            return self
-                .snapshot(&cfg.name)
-                .await
-                .ok_or_else(|| anyhow!("already running but no snapshot"));
+        let _lifecycle_guard = self.lock_lifecycle(&cfg.name).await;
+        match self.registry.read().await.get(&cfg.name) {
+            Some(current) if current == cfg => {}
+            Some(_) => {
+                bail!(
+                    "configuration for '{}' changed before Start acquired its lifecycle lock; retry with the latest config",
+                    cfg.name
+                );
+            }
+            None => {
+                bail!(
+                    "configuration for '{}' was removed before Start acquired its lifecycle lock",
+                    cfg.name
+                );
+            }
         }
-
         let services = cfg.services_for_profile(profile);
         if services.is_empty() {
             bail!("profile '{}' selects no services", profile);
         }
         let ordered = ports::topo_sort(&services)?;
 
-        // Allocate ports, avoiding ones already held by other live runs.
-        let alloc = {
-            let reserved = self.reserved.lock().await;
-            ports::allocate(&ordered, &reserved)?
+        // A launch-time discovery pass may have adopted only part of a profile.
+        // Reuse those live services and continue starting the missing siblings;
+        // return early only when the requested profile is fully represented.
+        let (existing_live, existing_ports): (HashSet<String>, BTreeMap<String, u16>) = {
+            let runs = self.runs.lock().await;
+            let live: HashSet<String> = runs
+                .get(&cfg.name)
+                .map(|run| {
+                    run.services
+                        .values()
+                        .filter(|service| service.status.is_live())
+                        .map(|service| service.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let ports = runs
+                .get(&cfg.name)
+                .map(|run| {
+                    run.services
+                        .values()
+                        .filter(|service| service.status.is_live())
+                        .filter_map(|service| service.port.map(|port| (service.name.clone(), port)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (live, ports)
         };
+        if ordered
+            .iter()
+            .all(|service| existing_live.contains(&service.name))
+        {
+            for service in &ordered {
+                self.await_ready(&cfg.name, &service.name).await?;
+            }
+            return self
+                .snapshot(&cfg.name)
+                .await
+                .ok_or_else(|| anyhow!("already running but no snapshot"));
+        }
+
+        // Held only through discovery/allocation/reservation, not process spawn.
+        let _allocation_guard = self.allocation_lock.lock().await;
+
+        // Discover an externally-started copy on each configured/preferred port
+        // BEFORE allocation. Without this pass, a relocatable service such as
+        // Vite on 5173 looks merely "busy", gets bumped to 5174, and Harbor
+        // creates exactly the duplicate it is meant to prevent.
+        let reserved_snapshot = self.reserved.lock().await.clone();
+        let root_for_scan = cfg.root.clone();
+        let observed = tokio::task::spawn_blocking(move || {
+            crate::discovery::listeners_for_root(&root_for_scan)
+        })
+        .await
+        .unwrap_or_default();
+        let mut external_recs: Vec<PersistedRun> = Vec::new();
+        let mut external_claims: BTreeMap<String, u16> = existing_ports.clone();
+        let mut claimed_groups: HashSet<u32> = HashSet::new();
+        for svc in &ordered {
+            if existing_live.contains(&svc.name) {
+                continue;
+            }
+            let preferred = ports::discovery_port(svc);
+            let exact: Vec<u16> = observed
+                .iter()
+                .filter(|listener| Some(listener.port) == preferred)
+                .map(|listener| listener.port)
+                .collect();
+            let mut candidates: Vec<u16> = if exact.is_empty() {
+                observed
+                    .iter()
+                    .filter(|listener| {
+                        command_matches_for_adoption(&svc.command, &listener.command)
+                    })
+                    .map(|listener| listener.port)
+                    .collect()
+            } else {
+                exact
+            };
+            candidates.sort_unstable();
+            candidates.dedup();
+            candidates.retain(|port| !reserved_snapshot.contains(port));
+
+            if candidates.len() > 1 {
+                bail!(
+                    "found multiple already-running candidates for {}/{} on ports {}. Harbor \
+                     will not guess or start another copy; open Local servers to choose which \
+                     duplicate to keep.",
+                    cfg.name,
+                    svc.name,
+                    candidates
+                        .iter()
+                        .map(u16::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+
+            let p = match candidates.first().copied() {
+                Some(p) => p,
+                None => {
+                    let Some(p) = preferred else {
+                        continue;
+                    };
+                    if reserved_snapshot.contains(&p) || ports::is_port_free(p) {
+                        continue;
+                    }
+                    p
+                }
+            };
+            if let Some(rec) = detect_external(
+                &cfg.name,
+                &svc.name,
+                &svc.command,
+                p,
+                &cfg.root,
+                Some(profile.to_string()),
+            ) {
+                // One process group may expose more than one socket. Never map
+                // the same external group onto two configured service names.
+                if claimed_groups.insert(rec.pid) {
+                    external_claims.insert(svc.name.clone(), p);
+                    external_recs.push(rec);
+                }
+            } else if listener_belongs_to_app_observation(p, &cfg.root) {
+                bail!(
+                    "{} already has a project-related listener on port {p}, but its command or \
+                     process group does not safely match service '{}'. Harbor will not guess, \
+                     take control, or start a duplicate. Open Local servers to inspect it, or \
+                     stop it from the tool that launched it first.",
+                    cfg.name,
+                    svc.name
+                );
+            }
+        }
+
+        // Allocate everything else, preserving observed ports as explicit
+        // claims so cross-service placeholders resolve to the existing server.
+        let mut alloc =
+            ports::allocate_with_claims(&ordered, &reserved_snapshot, &external_claims)?;
+        for entry in &mut alloc.plan {
+            if existing_live.contains(&entry.service) {
+                entry.note = Some("already running — reused".to_string());
+            }
+        }
 
         // Preflight: a chosen port that's already bound would crash the child
         // with EADDRINUSE. But if an externally-started server is sitting on it
         // and corroborates as THIS app (port + project folder), adopt it instead
         // of spawning a duplicate. Only bail when the holder isn't this app. (Our
         // own already-running run was short-circuited by `is_running` above.)
-        let mut external_recs: Vec<PersistedRun> = Vec::new();
         for (svc_name, p) in &alloc.ports {
+            if external_claims.contains_key(svc_name) {
+                continue; // already corroborated in the pre-allocation pass
+            }
             if ports::is_port_free(*p) {
                 continue;
             }
-            if let Some(rec) =
-                detect_external(&cfg.name, svc_name, *p, &cfg.root, Some(profile.to_string()))
-            {
+            let expected_command = ordered
+                .iter()
+                .find(|service| service.name == *svc_name)
+                .map(|service| service.command.as_str())
+                .unwrap_or("");
+            if let Some(rec) = detect_external(
+                &cfg.name,
+                svc_name,
+                expected_command,
+                *p,
+                &cfg.root,
+                Some(profile.to_string()),
+            ) {
                 external_recs.push(rec);
                 continue;
             }
@@ -679,19 +1201,20 @@ impl Supervisor {
                 reserved.insert(*p);
             }
         }
+        drop(_allocation_guard);
 
-        // Fresh run record (replaces any prior exited run).
+        // Create a run or extend a partially-adopted one. Never replace live
+        // services discovered just before Start.
         {
             let mut runs = self.runs.lock().await;
-            runs.insert(
-                cfg.name.clone(),
-                AppRun {
-                    profile: Some(profile.to_string()),
-                    port_plan: alloc.plan.clone(),
-                    services: BTreeMap::new(),
-                    intentional_stop: HashSet::new(),
-                },
-            );
+            let run = runs.entry(cfg.name.clone()).or_insert_with(|| AppRun {
+                profile: Some(profile.to_string()),
+                port_plan: Vec::new(),
+                services: BTreeMap::new(),
+                intentional_stop: HashSet::new(),
+            });
+            run.profile = Some(profile.to_string());
+            run.port_plan = alloc.plan.clone();
         }
 
         // Reflect any externally-started services as `external` adoptions; the
@@ -699,11 +1222,20 @@ impl Supervisor {
         let mut adopted_external: HashSet<String> = HashSet::new();
         for rec in external_recs {
             adopted_external.insert(rec.service.clone());
-            self.adopt_external(cfg, Some(profile.to_string()), rec).await;
+            self.adopt_external(cfg, Some(profile.to_string()), rec)
+                .await;
         }
 
         let root = PathBuf::from(&cfg.root);
         for svc in &ordered {
+            if existing_live.contains(&svc.name) {
+                if let Err(error) = self.await_ready(&cfg.name, &svc.name).await {
+                    self.release_unclaimed_reservations(&cfg.name, &alloc.ports)
+                        .await;
+                    return Err(error);
+                }
+                continue;
+            }
             if adopted_external.contains(&svc.name) {
                 continue; // already running outside Harbor — adopted, not respawned
             }
@@ -711,7 +1243,16 @@ impl Supervisor {
             let (resolved_command, resolved_env) = ports::resolve_service(svc, &alloc.ports);
 
             match self
-                .spawn_service(cfg, svc, &root, profile, port, &resolved_command, &resolved_env, 0)
+                .spawn_service(
+                    cfg,
+                    svc,
+                    &root,
+                    profile,
+                    port,
+                    &resolved_command,
+                    &resolved_env,
+                    0,
+                )
                 .await
             {
                 Ok(()) => {}
@@ -720,23 +1261,32 @@ impl Supervisor {
                         .await;
                     self.set_status(&cfg.name, &svc.name, ServiceStatus::Exited, Some(-1))
                         .await;
-                    if let Some(p) = port {
-                        self.reserved.lock().await.remove(&p);
-                    }
+                    self.release_unclaimed_reservations(&cfg.name, &alloc.ports)
+                        .await;
                     bail!("service '{}' failed to start: {e}", svc.name);
                 }
             }
 
             // Gate dependents: wait for this service to become ready before the
             // next (topo order guarantees deps precede dependents).
-            self.await_ready(&cfg.name, &svc.name).await;
+            if let Err(error) = self.await_ready(&cfg.name, &svc.name).await {
+                self.release_unclaimed_reservations(&cfg.name, &alloc.ports)
+                    .await;
+                return Err(error);
+            }
         }
 
-        self.snapshot(&cfg.name)
-            .await
-            .ok_or_else(|| anyhow!("run vanished after start"))
+        match self.snapshot(&cfg.name).await {
+            Some(snapshot) => Ok(snapshot),
+            None => {
+                self.release_unclaimed_reservations(&cfg.name, &alloc.ports)
+                    .await;
+                Err(anyhow!("run vanished after start"))
+            }
+        }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_service(
         &self,
         cfg: &AppConfig,
@@ -775,14 +1325,17 @@ impl Supervisor {
             });
         }
 
-        let mut child = cmd
-            .spawn()
-            .with_context_path(&cwd, resolved_command)?;
+        let mut child = cmd.spawn().with_context_path(&cwd, resolved_command)?;
         let pid = child.id();
 
         // Capture the kernel start-time now (for PID-reuse-safe adoption) and
         // persist the run so a relaunched Harbor can re-adopt it.
         let started_at = pid.and_then(ps_facts).map(|f| f.started_at);
+        let monitor_identity = MonitorIdentity {
+            pid,
+            started_at: started_at.clone(),
+            adopted: false,
+        };
         if let Some(pidv) = pid {
             let _ = self.store.upsert_run(PersistedRun {
                 app: cfg.name.clone(),
@@ -814,7 +1367,7 @@ impl Supervisor {
                     resolved_command: Some(resolved_command.to_string()),
                     exit_code: None,
                     logs: VecDeque::new(),
-                    started_at,
+                    started_at: started_at.clone(),
                     adopted: false,
                     external: false,
                     root: None,
@@ -826,7 +1379,14 @@ impl Supervisor {
                 },
             );
         }
-        self.emit_status(&cfg.name, svc.name.clone(), ServiceStatus::Starting, port, pid, None);
+        self.emit_status(
+            &cfg.name,
+            svc.name.clone(),
+            ServiceStatus::Starting,
+            port,
+            pid,
+            None,
+        );
         self.system_log(
             &cfg.name,
             &svc.name,
@@ -839,7 +1399,8 @@ impl Supervisor {
         .await;
 
         // Reader tasks for stdout/stderr.
-        let ready_pattern = svc.ready_log_pattern.clone();
+        let ready_pattern = service_log_ready_pattern(svc);
+        let has_log_readiness = ready_pattern.is_some();
         if let Some(out) = child.stdout.take() {
             self.spawn_reader(
                 cfg.name.clone(),
@@ -847,10 +1408,18 @@ impl Supervisor {
                 "stdout",
                 out,
                 ready_pattern.clone(),
+                monitor_identity.clone(),
             );
         }
         if let Some(err) = child.stderr.take() {
-            self.spawn_reader(cfg.name.clone(), svc.name.clone(), "stderr", err, ready_pattern);
+            self.spawn_reader(
+                cfg.name.clone(),
+                svc.name.clone(),
+                "stderr",
+                err,
+                ready_pattern,
+                monitor_identity.clone(),
+            );
         }
 
         // Monitor task owns the Child: waits, reaps, records exit, frees port,
@@ -864,35 +1433,50 @@ impl Supervisor {
             let app_name = cfg.name.clone();
             let svc_name = svc.name.clone();
             let me = self.me.clone();
+            let identity = monitor_identity.clone();
             tokio::spawn(async move {
                 let status = child.wait().await;
                 let code = status.ok().and_then(|s| s.code());
 
-                // Consume the intentional-stop marker UNDER the runs lock (the
-                // same lock stop() writes it under) — this is what makes the
-                // stop-vs-crash decision race-free. A missing run means stop()
-                // already removed it ⇒ intentional.
-                let intended = {
-                    let mut r = runs.lock().await;
-                    r.get_mut(&app_name)
-                        .map(|run| run.intentional_stop.remove(&svc_name))
-                        .unwrap_or(true)
+                // Update status immediately so a Start currently awaiting
+                // readiness can fail fast. The identity gate prevents an old
+                // monitor from touching a replacement in the same slot.
+                let cleanup = mark_exited_if_current(
+                    &app, &runs, &app_name, &svc_name, &identity, code, true,
+                )
+                .await;
+                let Some(cleanup) = cleanup else {
+                    return;
                 };
 
-                set_status_inner(&app, &runs, &app_name, &svc_name, ServiceStatus::Exited, code)
-                    .await;
-                if let Some(p) = port {
-                    reserved.lock().await.remove(&p);
+                // Persistence and reservation cleanup must serialize with a new
+                // Start/Restart. Acquire only AFTER publishing Exited; acquiring
+                // before it would deadlock a Start that holds the lifecycle lock
+                // while awaiting this very status transition.
+                let supervisor = me.upgrade();
+                let lifecycle_guard = match supervisor.as_ref() {
+                    Some(supervisor) => Some(supervisor.lock_lifecycle(&app_name).await),
+                    None => None,
+                };
+                let still_current =
+                    monitor_identity_is_current(&runs, &app_name, &svc_name, &identity).await;
+                if still_current {
+                    let _ = store.remove_run(&app_name, &svc_name);
                 }
-                let _ = store.remove_run(&app_name, &svc_name);
+                if let Some(port) = cleanup.port {
+                    release_port_if_unclaimed(&runs, &reserved, port).await;
+                }
+                drop(lifecycle_guard);
 
-                if !intended {
-                    if let Some(sup) = me.upgrade() {
+                if !cleanup.intended && still_current {
+                    if let Some(supervisor) = supervisor {
                         // `on_unexpected_exit` returns a boxed `Send` future,
                         // crossing a type-erased boundary that breaks the Send
                         // auto-trait inference cycle from the async recursion
                         // (spawn_service → monitor → on_unexpected_exit → …).
-                        sup.on_unexpected_exit(&app_name, &svc_name, code).await;
+                        supervisor
+                            .on_unexpected_exit(&app_name, &svc_name, code)
+                            .await;
                     }
                 }
             });
@@ -905,6 +1489,7 @@ impl Supervisor {
                 let app = self.app.clone();
                 let app_name = cfg.name.clone();
                 let svc_name = svc.name.clone();
+                let identity = monitor_identity.clone();
                 tokio::spawn(async move {
                     let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
                     loop {
@@ -912,17 +1497,12 @@ impl Supervisor {
                             break;
                         }
                         // Stop polling if the service already left `starting`.
-                        if !is_starting(&runs, &app_name, &svc_name).await {
+                        if !is_starting_current(&runs, &app_name, &svc_name, &identity).await {
                             break;
                         }
                         if health::check_once(&hc, port).await {
-                            set_status_inner(
-                                &app,
-                                &runs,
-                                &app_name,
-                                &svc_name,
-                                ServiceStatus::Ready,
-                                None,
+                            mark_ready_if_starting_current(
+                                &app, &runs, &app_name, &svc_name, &identity,
                             )
                             .await;
                             break;
@@ -938,7 +1518,7 @@ impl Supervisor {
             svc.health_check,
             Some(HealthCheck::Http { .. }) | Some(HealthCheck::Tcp)
         );
-        if svc.ready_log_pattern.is_none() && !has_probe {
+        if !has_log_readiness && !has_probe {
             self.set_status(&cfg.name, &svc.name, ServiceStatus::Ready, None)
                 .await;
         }
@@ -953,6 +1533,7 @@ impl Supervisor {
         stream: &'static str,
         reader: R,
         ready_pattern: Option<String>,
+        identity: MonitorIdentity,
     ) where
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
     {
@@ -971,21 +1552,16 @@ impl Supervisor {
                     ts: now_millis(),
                     seq: seq_n,
                 };
-                push_log(&runs, &app_name, &svc_name, log.clone()).await;
+                if !push_log_if_current(&runs, &app_name, &svc_name, &identity, log.clone()).await {
+                    break;
+                }
                 let _ = app.emit(LOG_EVENT, &log);
 
                 // readyLogPattern: flip starting → ready on a substring match.
                 if let Some(pat) = &ready_pattern {
-                    if !pat.is_empty() && line.contains(pat.as_str())
-                        && is_starting(&runs, &app_name, &svc_name).await
-                    {
-                        set_status_inner(
-                            &app,
-                            &runs,
-                            &app_name,
-                            &svc_name,
-                            ServiceStatus::Ready,
-                            None,
+                    if !pat.is_empty() && line.contains(pat.as_str()) {
+                        mark_ready_if_starting_current(
+                            &app, &runs, &app_name, &svc_name, &identity,
                         )
                         .await;
                     }
@@ -994,91 +1570,158 @@ impl Supervisor {
         });
     }
 
-    /// Stop every service in an app: SIGTERM the group, then SIGKILL after grace.
+    /// Stop every service in an app. This is the local, explicitly-confirmed UI
+    /// path and may include a corroborated process started outside Harbor.
     pub async fn stop(&self, app_name: &str) -> Result<()> {
-        // Mark every live service intentional BEFORE any signalling, latched on
-        // the AppRun for the whole stop sequence (covers SIGTERM, the grace
-        // window, SIGKILL escalation). Each monitor consumes its own name on
-        // exit, so a deliberate Stop is never mistaken for a crash.
-        {
+        self.stop_with_policy(app_name, StopPolicy::AllowExternal)
+            .await
+    }
+
+    /// Stop only when every live service was spawned by Harbor. MCP and other
+    /// remote callers use this policy so an observation/adoption cannot silently
+    /// expand their authority to terminate a process started by another tool.
+    pub async fn stop_managed_only(&self, app_name: &str) -> Result<()> {
+        self.stop_with_policy(app_name, StopPolicy::ManagedOnly)
+            .await
+    }
+
+    async fn stop_with_policy(&self, app_name: &str, policy: StopPolicy) -> Result<()> {
+        let _lifecycle_guard = self.lock_lifecycle(app_name).await;
+
+        self.stop_locked(app_name, policy).await
+    }
+
+    /// Stop implementation. The app lifecycle lock must be held by the caller
+    /// across the policy check, signalling, verification, and state cleanup.
+    async fn stop_locked(&self, app_name: &str, policy: StopPolicy) -> Result<()> {
+        let identities: Vec<StopIdentity> = {
             let mut runs = self.runs.lock().await;
-            if let Some(run) = runs.get_mut(app_name) {
-                let names: Vec<String> = run
+            let Some(run) = runs.get_mut(app_name) else {
+                drop(runs);
+                self.store.remove_app_runs(app_name)?;
+                return Ok(());
+            };
+
+            if policy == StopPolicy::ManagedOnly
+                && run
                     .services
                     .values()
-                    .filter(|s| s.status.is_live())
-                    .map(|s| s.name.clone())
-                    .collect();
-                for n in names {
-                    run.intentional_stop.insert(n);
-                }
+                    .any(|service| service.status.is_live() && service.external)
+            {
+                bail!(
+                    "external confirmation required: this app includes a process Harbor did not \
+                     launch; stop it from the Harbor UI so the process-group impact is visible"
+                );
             }
-        }
 
+            let identities: Vec<StopIdentity> = run
+                .services
+                .values()
+                .filter(|service| service.status.is_live())
+                .filter_map(|service| {
+                    service.pid.map(|pid| StopIdentity {
+                        name: service.name.clone(),
+                        pid,
+                        started_at: service.started_at.clone(),
+                        port: service.port,
+                    })
+                })
+                .collect();
+
+            // Latch intent before any signal. Monitors consume their own marker
+            // when they reap; survivors have the marker removed before an error
+            // is returned so a later, unrelated crash is not misclassified.
+            for service in run
+                .services
+                .values()
+                .filter(|service| service.status.is_live())
+            {
+                run.intentional_stop.insert(service.name.clone());
+            }
+            identities
+        };
+
+        let mut signal_errors = Vec::new();
         let targets = self.live_signal_targets(app_name).await;
-        if targets.is_empty() {
-            // Nothing (still) live; clear any stale records.
-            self.runs.lock().await.remove(app_name);
-            let _ = self.store.remove_app_runs(app_name);
-            return Ok(());
-        }
-
         for (name, pid) in &targets {
-            self.system_log(app_name, name, "SIGTERM → process group").await;
-            let _ = killpg(Pid::from_raw(*pid as i32), Signal::SIGTERM);
-        }
-
-        // Poll until every targeted process is actually gone, up to the grace
-        // period. (Adopted services have no monitor task, so we verify via `ps`
-        // rather than waiting for a monitor-recorded exit.)
-        let deadline = tokio::time::Instant::now() + STOP_GRACE;
-        loop {
-            if !self.any_live_process(app_name).await {
-                break;
+            self.system_log(app_name, name, "SIGTERM → process group")
+                .await;
+            if let Err(error) = killpg(Pid::from_raw(*pid as i32), Signal::SIGTERM) {
+                let message = format!("SIGTERM {name} (pid {pid}): {error}");
+                self.system_log(app_name, name, &message).await;
+                signal_errors.push(message);
             }
-            if tokio::time::Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        // Escalate to SIGKILL for anything still alive (re-verified safe).
-        let still = self.live_signal_targets(app_name).await;
-        for (name, pid) in &still {
-            self.system_log(app_name, name, "SIGKILL → process group").await;
-            let _ = killpg(Pid::from_raw(*pid as i32), Signal::SIGKILL);
-        }
-        if !still.is_empty() {
-            // Give monitors a beat to reap.
-            tokio::time::sleep(Duration::from_millis(300)).await;
-        }
-
-        // Drop the run record + persisted entries; ports are freed by the
-        // monitors as they exit (adopted ports are freed below).
-        {
-            let mut runs = self.runs.lock().await;
-            if let Some(run) = runs.get(app_name) {
-                let adopted_ports: Vec<u16> = run
-                    .services
-                    .values()
-                    .filter(|s| s.adopted)
-                    .filter_map(|s| s.port)
-                    .collect();
-                if !adopted_ports.is_empty() {
-                    let mut reserved = self.reserved.lock().await;
-                    for p in adopted_ports {
-                        reserved.remove(&p);
-                    }
+        let mut survivors = self.wait_for_stop_identities(&identities, STOP_GRACE).await;
+        if !survivors.is_empty() {
+            // Re-resolve signal-safe targets immediately before escalation. A
+            // stale/reused or no-longer-corroborated adopted pid is retained as a
+            // survivor but never receives SIGKILL.
+            let still_signalable = self.live_signal_targets(app_name).await;
+            for (name, pid) in &still_signalable {
+                self.system_log(app_name, name, "SIGKILL → process group")
+                    .await;
+                if let Err(error) = killpg(Pid::from_raw(*pid as i32), Signal::SIGKILL) {
+                    let message = format!("SIGKILL {name} (pid {pid}): {error}");
+                    self.system_log(app_name, name, &message).await;
+                    signal_errors.push(message);
                 }
             }
-            runs.remove(app_name);
+            survivors = self
+                .wait_for_stop_identities(&identities, KILL_VERIFY_GRACE)
+                .await;
         }
-        let _ = self.store.remove_app_runs(app_name);
+
+        if !survivors.is_empty() {
+            {
+                let mut runs = self.runs.lock().await;
+                if let Some(run) = runs.get_mut(app_name) {
+                    run.intentional_stop.clear();
+                }
+            }
+            let detail = survivors
+                .iter()
+                .map(|identity| format!("{} (pid {})", identity.name, identity.pid))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let signal_detail = if signal_errors.is_empty() {
+                String::new()
+            } else {
+                format!(" Signal errors: {}.", signal_errors.join("; "))
+            };
+            bail!(
+                "Harbor could not stop every process for '{app_name}'; still running: {detail}.{signal_detail} State was retained."
+            );
+        }
+
+        // Only now—after every original process-group identity is gone—drop the
+        // run, persistence, and every allocated port. Monitor cleanup is
+        // idempotent and may race this path after reaping a child.
+        let mut ports_to_release: HashSet<u16> = identities
+            .iter()
+            .filter_map(|identity| identity.port)
+            .collect();
+        {
+            let mut runs = self.runs.lock().await;
+            if let Some(run) = runs.remove(app_name) {
+                ports_to_release.extend(run.services.values().filter_map(|service| service.port));
+            }
+        }
+        if !ports_to_release.is_empty() {
+            let mut reserved = self.reserved.lock().await;
+            for port in ports_to_release {
+                reserved.remove(&port);
+            }
+        }
+        self.store.remove_app_runs(app_name)?;
         Ok(())
     }
 
-    /// Live services to signal, filtering out adopted entries whose pid is no
-    /// longer provably ours (died and possibly reused since adoption).
+    /// Live services to signal, filtering out every entry whose leader identity
+    /// is no longer provably the captured generation. Managed Child monitors can
+    /// briefly lag behind `wait()`/reaping too, so PID-reuse safety is not only an
+    /// adoption concern.
     async fn live_signal_targets(&self, app_name: &str) -> Vec<(String, u32)> {
         type Cand = (String, u32, bool, Option<String>, Option<String>);
         let candidates: Vec<Cand> = {
@@ -1090,7 +1733,13 @@ impl Supervisor {
                     .filter(|s| s.status.is_live())
                     .filter_map(|s| {
                         s.pid.map(|p| {
-                            (s.name.clone(), p, s.adopted, s.started_at.clone(), s.root.clone())
+                            (
+                                s.name.clone(),
+                                p,
+                                s.adopted,
+                                s.started_at.clone(),
+                                s.root.clone(),
+                            )
                         })
                     })
                     .collect(),
@@ -1100,40 +1749,43 @@ impl Supervisor {
         candidates
             .into_iter()
             .filter(|(_, pid, adopted, started, root)| {
-                !*adopted || adopted_signal_ok(*pid, started.as_deref(), root.as_deref())
+                if *adopted {
+                    adopted_signal_ok(*pid, started.as_deref(), root.as_deref())
+                } else {
+                    safe_to_signal(*pid, started.as_deref())
+                }
             })
             .map(|(name, pid, _, _, _)| (name, pid))
             .collect()
     }
 
-    /// True if any live service of `app_name` still has a running process.
-    /// Monitored services are trusted (their monitor flips status on exit);
-    /// adopted services are verified directly with `ps`.
-    async fn any_live_process(&self, app_name: &str) -> bool {
-        let snap: Vec<(u32, bool, Option<String>, Option<String>)> = {
-            let runs = self.runs.lock().await;
-            match runs.get(app_name) {
-                Some(run) => run
-                    .services
-                    .values()
-                    .filter(|s| s.status.is_live())
-                    .filter_map(|s| {
-                        s.pid
-                            .map(|p| (p, s.adopted, s.started_at.clone(), s.root.clone()))
-                    })
-                    .collect(),
-                None => return false,
-            }
-        };
-        for (pid, adopted, started, root) in snap {
-            if !adopted {
-                return true; // monitored & still marked live → trust the monitor
-            }
-            if adopted_signal_ok(pid, started.as_deref(), root.as_deref()) {
-                return true; // adopted process still alive per `ps`
-            }
+    async fn surviving_stop_identities(&self, identities: &[StopIdentity]) -> Vec<StopIdentity> {
+        if identities.is_empty() {
+            return Vec::new();
         }
-        false
+        let candidates = identities.to_vec();
+        let fallback = candidates.clone();
+        tokio::task::spawn_blocking(move || {
+            candidates.into_iter().filter(stop_identity_alive).collect()
+        })
+        .await
+        // A failed verification task is not evidence of process death.
+        .unwrap_or(fallback)
+    }
+
+    async fn wait_for_stop_identities(
+        &self,
+        identities: &[StopIdentity],
+        timeout: Duration,
+    ) -> Vec<StopIdentity> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let survivors = self.surviving_stop_identities(identities).await;
+            if survivors.is_empty() || tokio::time::Instant::now() >= deadline {
+                return survivors;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Handle a Harbor-spawned service that exited WITHOUT a deliberate Stop.
@@ -1151,83 +1803,97 @@ impl Supervisor {
         exit_code: Option<i32>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-        if self.shutting_down.load(Ordering::SeqCst) {
-            return;
-        }
+            if self.shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
 
-        // Snapshot the (now-Exited) proc + run profile under the runs lock.
-        let snap = {
-            let runs = self.runs.lock().await;
-            runs.get(app).and_then(|r| {
-                let profile = r.profile.clone();
-                r.services.get(svc).map(|s| {
-                    (
-                        s.adopted,
-                        s.external,
-                        s.status,
-                        s.port,
-                        s.resolved_command.clone(),
-                        s.resolved_env.clone(),
-                        s.restart_count,
-                        s.ready_since,
-                        profile,
-                    )
+            // Snapshot the (now-Exited) proc + run profile under the runs lock.
+            let snap = {
+                let runs = self.runs.lock().await;
+                runs.get(app).and_then(|r| {
+                    let profile = r.profile.clone();
+                    r.services.get(svc).map(|s| {
+                        (
+                            MonitorIdentity {
+                                pid: s.pid,
+                                started_at: s.started_at.clone(),
+                                adopted: s.adopted,
+                            },
+                            s.external,
+                            s.status,
+                            s.port,
+                            s.resolved_command.clone(),
+                            s.resolved_env.clone(),
+                            s.restart_count,
+                            s.ready_since,
+                            profile,
+                        )
+                    })
                 })
-            })
-        };
-        let Some((adopted, external, status, port, cmd, env, count, ready_since, profile)) = snap
-        else {
-            return; // run gone (a Stop won the race) ⇒ nothing to do
-        };
-        // Belt-and-suspenders: adopted/external have no monitor and can't reach
-        // here, but never restart something Harbor didn't launch.
-        if adopted || external || status != ServiceStatus::Exited {
-            return;
-        }
+            };
+            let Some((identity, external, status, port, cmd, env, count, ready_since, profile)) =
+                snap
+            else {
+                return; // run gone (a Stop won the race) ⇒ nothing to do
+            };
+            // Belt-and-suspenders: adopted/external have no monitor and can't reach
+            // here, but never restart something Harbor didn't launch.
+            if identity.adopted || external || status != ServiceStatus::Exited {
+                return;
+            }
 
-        // Read possibly-edited live config for the opt-in + service definition.
-        let cfg = self.registry.read().await.get(app).cloned();
-        let Some(cfg) = cfg else { return };
-        let Some(svc_cfg) = cfg.service(svc).cloned() else {
-            return;
-        };
+            // Read possibly-edited live config for the opt-in + service definition.
+            let cfg = self.registry.read().await.get(app).cloned();
+            let Some(cfg) = cfg else { return };
+            if !cfg.trusted {
+                self.system_log(
+                    app,
+                    svc,
+                    "auto-restart cancelled — the current config requires approval",
+                )
+                .await;
+                return;
+            }
+            let Some(svc_cfg) = cfg.service(svc).cloned() else {
+                return;
+            };
 
-        // Crash predicate (hard-req: exit-0). A failure is: signal death, any
-        // non-zero code, OR exit-0 that happened BEFORE the service ever became
-        // Ready (a crash-on-start that exits 0). Exit-0 after Ready / a one-shot
-        // running to completion is clean — never restart it.
-        let reached_ready = ready_since.is_some();
-        if !is_failure_exit(exit_code, reached_ready) {
-            self.system_log(app, svc, "exited cleanly (code 0)").await;
-            return;
-        }
+            // Crash predicate (hard-req: exit-0). A failure is: signal death, any
+            // non-zero code, OR exit-0 that happened BEFORE the service ever became
+            // Ready (a crash-on-start that exits 0). Exit-0 after Ready / a one-shot
+            // running to completion is clean — never restart it.
+            let reached_ready = ready_since.is_some();
+            if !is_failure_exit(exit_code, reached_ready) {
+                self.system_log(app, svc, "exited cleanly (code 0)").await;
+                return;
+            }
 
-        if !cfg.auto_restart {
-            self.notify_crash(app, svc, exit_code, false).await;
-            return;
-        }
+            if !cfg.auto_restart {
+                self.notify_crash(app, svc, exit_code, false).await;
+                return;
+            }
 
-        // Stability reset: a respawn that stayed Ready ≥ window starts fresh.
-        let count = match ready_since {
-            Some(t) if t.elapsed() >= RESTART_STABLE_RESET => 0,
-            _ => count,
-        };
-        if count >= RESTART_WINDOW_MAX {
-            self.system_log(
-                app,
-                svc,
-                &format!(
-                    "auto-restart gave up after {RESTART_WINDOW_MAX} attempts — service keeps \
+            // Stability reset: a respawn that stayed Ready ≥ window starts fresh.
+            let count = match ready_since {
+                Some(t) if t.elapsed() >= RESTART_STABLE_RESET => 0,
+                _ => count,
+            };
+            if count >= RESTART_WINDOW_MAX {
+                self.system_log(
+                    app,
+                    svc,
+                    &format!(
+                        "auto-restart gave up after {RESTART_WINDOW_MAX} attempts — service keeps \
                      crashing. Fix the error and Start again."
-                ),
-            )
-            .await;
-            self.notify_crash(app, svc, exit_code, true).await;
-            return;
-        }
+                    ),
+                )
+                .await;
+                self.notify_crash(app, svc, exit_code, true).await;
+                return;
+            }
 
-        let delay = RESTART_BACKOFF[count as usize];
-        self.system_log(
+            let delay = RESTART_BACKOFF[count as usize];
+            self.system_log(
             app,
             svc,
             &format!(
@@ -1235,48 +1901,73 @@ impl Supervisor {
                 count + 1,
                 exit_code.map(|c| format!("exit {c}")).unwrap_or_else(|| "signal".into())
             ),
-        )
-        .await;
-        tokio::time::sleep(Duration::from_secs(delay)).await;
+            )
+            .await;
+            tokio::time::sleep(Duration::from_secs(delay)).await;
 
-        // Re-validate after the backoff: shutdown / a Stop / a manual Start may
-        // have raced in. Only proceed if the service is still the Exited one.
-        if self.shutting_down.load(Ordering::SeqCst) {
-            return;
-        }
-        {
-            let runs = self.runs.lock().await;
-            match runs.get(app).and_then(|r| r.services.get(svc)) {
-                Some(s) if s.status == ServiceStatus::Exited && !s.adopted && !s.external => {}
-                _ => return,
-            }
-        }
+            // Serialize the post-backoff decision, reservation, and spawn with
+            // Start/Stop/discovery. Without this lock a Stop could snapshot the
+            // old Exited service, then remove all state while this task spawned a
+            // replacement that was absent from Stop's static identity set.
+            let _lifecycle_guard = self.lock_lifecycle(app).await;
 
-        // The crashed server should have released its port.
-        if let Some(p) = port {
-            if !ports::is_port_free(p) {
-                self.system_log(app, svc, "port no longer free — auto-restart gave up")
-                    .await;
-                self.notify_crash(app, svc, exit_code, true).await;
+            // Re-validate after both the backoff and lock wait: shutdown / a Stop /
+            // a manual Start may have won while this task was suspended. Only
+            // proceed if the service is still the same Exited generation.
+            if self.shutting_down.load(Ordering::SeqCst) {
                 return;
             }
-            self.reserved.lock().await.insert(p);
-        }
-
-        let root = PathBuf::from(&cfg.root);
-        let profile = profile.unwrap_or_else(|| "default".to_string());
-        let env = env.unwrap_or_default();
-        let cmd = cmd.unwrap_or_default();
-        if let Err(e) = self
-            .spawn_service(&cfg, &svc_cfg, &root, &profile, port, &cmd, &env, count + 1)
-            .await
-        {
-            self.system_log(app, svc, &format!("auto-restart failed to spawn: {e}"))
+            let config_is_current = self
+                .registry
+                .read()
+                .await
+                .get(app)
+                .is_some_and(|current| current == &cfg);
+            if !config_is_current {
+                self.system_log(
+                    app,
+                    svc,
+                    "auto-restart cancelled — configuration changed during backoff",
+                )
                 .await;
-            if let Some(p) = port {
-                self.reserved.lock().await.remove(&p);
+                return;
             }
-        }
+            {
+                let runs = self.runs.lock().await;
+                match runs.get(app).and_then(|r| r.services.get(svc)) {
+                    Some(s)
+                        if s.status == ServiceStatus::Exited
+                            && identity.matches(s)
+                            && !s.external => {}
+                    _ => return,
+                }
+            }
+
+            // The crashed server should have released its port.
+            if let Some(p) = port {
+                if !ports::is_port_free(p) {
+                    self.system_log(app, svc, "port no longer free — auto-restart gave up")
+                        .await;
+                    self.notify_crash(app, svc, exit_code, true).await;
+                    return;
+                }
+                self.reserved.lock().await.insert(p);
+            }
+
+            let root = PathBuf::from(&cfg.root);
+            let profile = profile.unwrap_or_else(|| "default".to_string());
+            let env = env.unwrap_or_default();
+            let cmd = cmd.unwrap_or_default();
+            if let Err(e) = self
+                .spawn_service(&cfg, &svc_cfg, &root, &profile, port, &cmd, &env, count + 1)
+                .await
+            {
+                self.system_log(app, svc, &format!("auto-restart failed to spawn: {e}"))
+                    .await;
+                if let Some(p) = port {
+                    self.reserved.lock().await.remove(&p);
+                }
+            }
         }) // end Box::pin(async move { … })
     }
 
@@ -1292,8 +1983,7 @@ impl Supervisor {
             let mut m = self.last_notified.lock().await;
             let key = (app.to_string(), svc.to_string());
             let now = Instant::now();
-            if m
-                .get(&key)
+            if m.get(&key)
                 .map(|t| now.duration_since(*t) < NOTIFY_COOLDOWN)
                 .unwrap_or(false)
             {
@@ -1304,7 +1994,9 @@ impl Supervisor {
         let (title, body) = if gave_up {
             (
                 format!("{app} — {svc} keeps crashing"),
-                format!("Gave up after {RESTART_WINDOW_MAX} restart attempts. Click to open Harbor."),
+                format!(
+                    "Gave up after {RESTART_WINDOW_MAX} restart attempts. Click to open Harbor."
+                ),
             )
         } else if code.is_none() {
             (
@@ -1335,7 +2027,13 @@ impl Supervisor {
     /// services (pid/port held, but no live log stream); everything stale is
     /// pruned. **Nothing is ever signalled here.**
     pub async fn adopt_persisted(&self) {
-        let file = self.store.load_runs().unwrap_or_default();
+        let file = match self.store.load_runs() {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!("[harbor] could not read saved run identities: {error}");
+                return;
+            }
+        };
         if file.runs.is_empty() {
             return;
         }
@@ -1538,15 +2236,38 @@ impl Supervisor {
         self.spawn_adopted_monitor(rec);
     }
 
-    /// If `cfg` isn't already tracked as running, probe each of its ported
-    /// (default-profile) services for an externally-started server and reflect
-    /// any that corroborate as this app. Cheap: a free port costs one `lsof`.
+    /// Probe every configured service (across all profiles) on its pinned or
+    /// preferred port and reflect any externally-started server that
+    /// corroborates as this app. Already-tracked service names are skipped, but
+    /// one running service no longer prevents discovery of its siblings.
     pub async fn reflect_external_if_idle(&self, cfg: &AppConfig) {
-        if self.is_running(&cfg.name).await {
+        if !cfg.trusted {
             return;
         }
-        for svc in cfg.services_for_profile("default") {
-            let Some(port) = ports::effective_port(&svc) else {
+        let _lifecycle_guard = self.lock_lifecycle(&cfg.name).await;
+        let config_is_current = self
+            .registry
+            .read()
+            .await
+            .get(&cfg.name)
+            .is_some_and(|current| current == cfg);
+        if !config_is_current {
+            return;
+        }
+
+        for svc in &cfg.services {
+            let already_tracked = self
+                .runs
+                .lock()
+                .await
+                .get(&cfg.name)
+                .and_then(|r| r.services.get(&svc.name))
+                .map(|s| s.status.is_live())
+                .unwrap_or(false);
+            if already_tracked {
+                continue;
+            }
+            let Some(port) = ports::discovery_port(svc) else {
                 continue;
             };
             if ports::is_port_free(port) {
@@ -1554,15 +2275,19 @@ impl Supervisor {
             }
             let app = cfg.name.clone();
             let svc_name = svc.name.clone();
+            let command = svc.command.clone();
             let root = cfg.root.clone();
             let rec = tokio::task::spawn_blocking(move || {
-                detect_external(&app, &svc_name, port, &root, Some("default".to_string()))
+                detect_external(&app, &svc_name, &command, port, &root, None)
             })
             .await
             .ok()
             .flatten();
             if let Some(rec) = rec {
-                self.adopt_external(cfg, Some("default".to_string()), rec).await;
+                if self.owns_pid(rec.pid).await {
+                    continue;
+                }
+                self.adopt_external(cfg, None, rec).await;
             }
         }
     }
@@ -1583,6 +2308,12 @@ impl Supervisor {
         let reserved = self.reserved.clone();
         let store = self.store.clone();
         let app = self.app.clone();
+        let me = self.me.clone();
+        let identity = MonitorIdentity {
+            pid: Some(e.pid),
+            started_at: Some(e.started_at.clone()),
+            adopted: true,
+        };
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(4)).await;
@@ -1590,23 +2321,41 @@ impl Supervisor {
                     let r = runs.lock().await;
                     r.get(&e.app)
                         .and_then(|a| a.services.get(&e.service))
-                        .map(|s| s.status.is_live())
-                        .unwrap_or(false)
+                        .is_some_and(|service| {
+                            service.status.is_live() && identity.matches(service)
+                        })
                 };
                 if !live {
-                    break; // stopped / removed / already exited
+                    break; // stopped, removed, exited, or replaced generation
                 }
                 let entry = e.clone();
                 let alive = tokio::task::spawn_blocking(move || still_ours(&entry))
                     .await
                     .unwrap_or(false);
                 if !alive {
-                    set_status_inner(&app, &runs, &e.app, &e.service, ServiceStatus::Exited, None)
-                        .await;
-                    if let Some(p) = e.port {
-                        reserved.lock().await.remove(&p);
+                    let cleanup = mark_exited_if_current(
+                        &app, &runs, &e.app, &e.service, &identity, None, false,
+                    )
+                    .await;
+                    let Some(cleanup) = cleanup else {
+                        break;
+                    };
+
+                    // A Stop/Start may replace this slot between the liveness
+                    // probe and cleanup. Serialize persistence deletion with
+                    // lifecycle operations, then prove the old identity again.
+                    let supervisor = me.upgrade();
+                    let lifecycle_guard = match supervisor.as_ref() {
+                        Some(supervisor) => Some(supervisor.lock_lifecycle(&e.app).await),
+                        None => None,
+                    };
+                    if monitor_identity_is_current(&runs, &e.app, &e.service, &identity).await {
+                        let _ = store.remove_run(&e.app, &e.service);
                     }
-                    let _ = store.remove_run(&e.app, &e.service);
+                    if let Some(port) = cleanup.port {
+                        release_port_if_unclaimed(&runs, &reserved, port).await;
+                    }
+                    drop(lifecycle_guard);
                     break;
                 }
             }
@@ -1615,25 +2364,81 @@ impl Supervisor {
 
     // ---- small helpers ----------------------------------------------------
 
-    async fn await_ready(&self, app_name: &str, svc_name: &str) {
+    /// Release ports reserved for this start attempt that no live service ended
+    /// up claiming. Ports for already-ready, newly-ready, or unhealthy-but-live
+    /// processes remain reserved; failed and not-yet-attempted services do not
+    /// poison future allocations after Start returns an error.
+    async fn release_unclaimed_reservations(
+        &self,
+        app_name: &str,
+        allocated: &BTreeMap<String, u16>,
+    ) {
+        let claimed: HashSet<u16> = {
+            let runs = self.runs.lock().await;
+            runs.get(app_name)
+                .map(|run| {
+                    run.services
+                        .values()
+                        .filter(|service| service.status.is_live())
+                        .filter_map(|service| service.port)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut reserved = self.reserved.lock().await;
+        for port in allocated.values() {
+            if !claimed.contains(port) {
+                reserved.remove(port);
+            }
+        }
+    }
+
+    async fn await_ready(&self, app_name: &str, svc_name: &str) -> Result<()> {
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
-            let status = {
+            let state = {
                 let runs = self.runs.lock().await;
                 runs.get(app_name)
                     .and_then(|r| r.services.get(svc_name))
-                    .map(|s| s.status)
+                    .map(|s| (s.status, s.exit_code))
             };
-            match status {
-                Some(ServiceStatus::Starting) => {}
-                _ => return, // ready / exited / unhealthy / gone
+            match state {
+                Some((ServiceStatus::Ready, _)) => return Ok(()),
+                Some((ServiceStatus::Starting, _)) => {}
+                Some((ServiceStatus::Unhealthy, _)) => {
+                    bail!("service '{svc_name}' is unhealthy; refusing to start its dependents");
+                }
+                Some((ServiceStatus::Exited, code)) => {
+                    let detail = code
+                        .map(|code| format!("exit {code}"))
+                        .unwrap_or_else(|| "signal or unknown exit".to_string());
+                    bail!(
+                        "service '{svc_name}' exited before becoming ready ({detail}); refusing to start its dependents"
+                    );
+                }
+                Some((ServiceStatus::Stopped, _)) => {
+                    bail!(
+                        "service '{svc_name}' stopped before becoming ready; refusing to start its dependents"
+                    );
+                }
+                None => {
+                    bail!(
+                        "service '{svc_name}' disappeared before becoming ready; refusing to start its dependents"
+                    );
+                }
             }
             if tokio::time::Instant::now() >= deadline {
-                self.system_log(app_name, svc_name, "readiness timeout → marking unhealthy")
-                    .await;
-                self.set_status(app_name, svc_name, ServiceStatus::Unhealthy, None)
-                    .await;
-                return;
+                if self.mark_unhealthy_if_starting(app_name, svc_name).await {
+                    self.system_log(app_name, svc_name, "readiness timeout → marking unhealthy")
+                        .await;
+                    bail!(
+                        "service '{svc_name}' did not become ready within {}s; refusing to start its dependents",
+                        READY_TIMEOUT.as_secs()
+                    );
+                }
+                // A health/log task won the race at the deadline. Re-read the
+                // resulting state instead of overwriting Ready with Unhealthy.
+                continue;
             }
             tokio::time::sleep(HEALTH_POLL).await;
         }
@@ -1647,6 +2452,35 @@ impl Supervisor {
         exit_code: Option<i32>,
     ) {
         set_status_inner(&self.app, &self.runs, app_name, svc_name, status, exit_code).await;
+    }
+
+    /// Atomically marks a timed-out service unhealthy only while it is still
+    /// starting. Readiness checks run independently and may publish Ready at
+    /// the exact deadline; that successful transition must win the race.
+    async fn mark_unhealthy_if_starting(&self, app_name: &str, svc_name: &str) -> bool {
+        let event = {
+            let mut runs = self.runs.lock().await;
+            let Some(service) = runs
+                .get_mut(app_name)
+                .and_then(|run| run.services.get_mut(svc_name))
+            else {
+                return false;
+            };
+            if service.status != ServiceStatus::Starting {
+                return false;
+            }
+            service.status = ServiceStatus::Unhealthy;
+            (service.port, service.pid)
+        };
+        self.emit_status(
+            app_name,
+            svc_name.to_string(),
+            ServiceStatus::Unhealthy,
+            event.0,
+            event.1,
+            None,
+        );
+        true
     }
 
     fn emit_status(
@@ -1688,12 +2522,18 @@ impl Supervisor {
 
 // ---- free functions usable from spawned tasks (no &self) ------------------
 
-async fn is_starting(runs: &Runs, app_name: &str, svc_name: &str) -> bool {
+async fn is_starting_current(
+    runs: &Runs,
+    app_name: &str,
+    svc_name: &str,
+    identity: &MonitorIdentity,
+) -> bool {
     let runs = runs.lock().await;
     runs.get(app_name)
         .and_then(|r| r.services.get(svc_name))
-        .map(|s| s.status == ServiceStatus::Starting)
-        .unwrap_or(false)
+        .is_some_and(|service| {
+            service.status == ServiceStatus::Starting && identity.matches(service)
+        })
 }
 
 async fn push_log(runs: &Runs, app_name: &str, svc_name: &str, log: LogLine) {
@@ -1707,6 +2547,145 @@ async fn push_log(runs: &Runs, app_name: &str, svc_name: &str, log: LogLine) {
             svc.logs.pop_front();
         }
     }
+}
+
+async fn push_log_if_current(
+    runs: &Runs,
+    app_name: &str,
+    svc_name: &str,
+    identity: &MonitorIdentity,
+    log: LogLine,
+) -> bool {
+    let mut runs = runs.lock().await;
+    let Some(service) = runs
+        .get_mut(app_name)
+        .and_then(|run| run.services.get_mut(svc_name))
+    else {
+        return false;
+    };
+    if !identity.matches(service) {
+        return false;
+    }
+    service.logs.push_back(log);
+    while service.logs.len() > RING_CAP {
+        service.logs.pop_front();
+    }
+    true
+}
+
+async fn mark_ready_if_starting_current(
+    app: &AppHandle,
+    runs: &Runs,
+    app_name: &str,
+    svc_name: &str,
+    identity: &MonitorIdentity,
+) -> bool {
+    let (port, pid) = {
+        let mut runs = runs.lock().await;
+        let Some(service) = runs
+            .get_mut(app_name)
+            .and_then(|run| run.services.get_mut(svc_name))
+        else {
+            return false;
+        };
+        if service.status != ServiceStatus::Starting || !identity.matches(service) {
+            return false;
+        }
+        service.status = ServiceStatus::Ready;
+        if service.ready_since.is_none() {
+            service.ready_since = Some(Instant::now());
+        }
+        (service.port, service.pid)
+    };
+    let _ = app.emit(
+        STATUS_EVENT,
+        StatusEvent {
+            app: app_name.to_string(),
+            service: svc_name.to_string(),
+            status: ServiceStatus::Ready,
+            port,
+            pid,
+            exit_code: None,
+        },
+    );
+    true
+}
+
+struct IdentityExit {
+    intended: bool,
+    port: Option<u16>,
+}
+
+async fn monitor_identity_is_current(
+    runs: &Runs,
+    app_name: &str,
+    svc_name: &str,
+    identity: &MonitorIdentity,
+) -> bool {
+    runs.lock()
+        .await
+        .get(app_name)
+        .and_then(|run| run.services.get(svc_name))
+        .is_some_and(|service| identity.matches(service))
+}
+
+/// Reservations are global and ownerless, so an old monitor may release its
+/// captured port only after proving no replacement/live service now claims it.
+async fn release_port_if_unclaimed(runs: &Runs, reserved: &Reserved, port: u16) {
+    let claimed = runs.lock().await.values().any(|run| {
+        run.services
+            .values()
+            .any(|service| service.status.is_live() && service.port == Some(port))
+    });
+    if !claimed {
+        reserved.lock().await.remove(&port);
+    }
+}
+
+/// Transition only the process generation a monitor was created for. Start,
+/// Restart, and external adoption may reuse the same `(app, service)` key while
+/// an older monitor is still scheduled; touching the replacement would orphan
+/// its live process and delete its persistence record.
+async fn mark_exited_if_current(
+    app: &AppHandle,
+    runs: &Runs,
+    app_name: &str,
+    svc_name: &str,
+    identity: &MonitorIdentity,
+    exit_code: Option<i32>,
+    consume_intent: bool,
+) -> Option<IdentityExit> {
+    let (intended, port, pid) = {
+        let mut runs = runs.lock().await;
+        let run = runs.get_mut(app_name)?;
+        let is_current = run
+            .services
+            .get(svc_name)
+            .is_some_and(|service| service.status.is_live() && identity.matches(service));
+        if !is_current {
+            return None;
+        }
+        let intended = consume_intent && run.intentional_stop.remove(svc_name);
+        let service = run
+            .services
+            .get_mut(svc_name)
+            .expect("identity checked above");
+        service.status = ServiceStatus::Exited;
+        service.exit_code = exit_code;
+        (intended, service.port, service.pid)
+    };
+    let _ = app.emit(
+        STATUS_EVENT,
+        StatusEvent {
+            app: app_name.to_string(),
+            service: svc_name.to_string(),
+            status: ServiceStatus::Exited,
+            port,
+            pid,
+            exit_code,
+        },
+    );
+    Some(IdentityExit { intended, port })
 }
 
 async fn set_status_inner(
@@ -1802,7 +2781,10 @@ mod tests {
         let a = ps_facts(me).expect("our own pid must resolve");
         let b = ps_facts(me).expect("second read");
         assert!(!a.started_at.is_empty(), "lstart should be non-empty");
-        assert_eq!(a.started_at, b.started_at, "lstart must be stable per process");
+        assert_eq!(
+            a.started_at, b.started_at,
+            "lstart must be stable per process"
+        );
     }
 
     #[test]
@@ -1833,6 +2815,16 @@ mod tests {
             root: None,
         };
         assert!(still_ours(&rec), "a live, matching, leader process is ours");
+        let stop_identity = StopIdentity {
+            name: "s".into(),
+            pid,
+            started_at: Some(facts.started_at.clone()),
+            port: None,
+        };
+        assert!(
+            stop_identity_alive(&stop_identity),
+            "stop verification should see the live process group"
+        );
 
         // A start-time mismatch (PID-reuse simulation) must fail the gate.
         let mut reused = rec.clone();
@@ -1844,7 +2836,14 @@ mod tests {
         let mut waitable = child;
         let _ = waitable.wait();
         std::thread::sleep(Duration::from_millis(150));
-        assert!(!still_ours(&rec), "after kill the process is no longer ours");
+        assert!(
+            !still_ours(&rec),
+            "after kill the process is no longer ours"
+        );
+        assert!(
+            !stop_identity_alive(&stop_identity),
+            "stop verification should see the process group disappear"
+        );
     }
 
     #[test]
@@ -1878,7 +2877,10 @@ mod tests {
         // a crash-on-start loop must terminate quickly (sum well under a minute).
         assert_eq!(RESTART_BACKOFF.len() as u32, RESTART_WINDOW_MAX);
         let total: u64 = RESTART_BACKOFF.iter().sum();
-        assert!(total < 60, "a crash loop should give up in < 60s, got {total}s");
+        assert!(
+            total < 60,
+            "a crash loop should give up in < 60s, got {total}s"
+        );
     }
 
     #[test]
@@ -1890,16 +2892,131 @@ mod tests {
         assert!(!path_under("/Users/x/opal-sandbox", "/Users/x/opal"));
         assert!(!path_under("/Users/x/other", "/Users/x/opal"));
         assert!(!path_under("/anything", ""));
+
+        assert!(argv_mentions_path(
+            "node /Users/x/opal/server.js --port 3000",
+            "/Users/x/opal"
+        ));
+        assert!(argv_mentions_path(
+            "node --cwd='/Users/x/opal' server.js",
+            "/Users/x/opal"
+        ));
+        assert!(!argv_mentions_path(
+            "node /Users/x/opal-sandbox/server.js",
+            "/Users/x/opal"
+        ));
+        assert!(!argv_mentions_path(
+            "node /prefix/Users/x/opal/server.js",
+            "/Users/x/opal"
+        ));
+    }
+
+    #[test]
+    fn monitor_identity_rejects_replacement_generation() {
+        let identity = MonitorIdentity {
+            pid: Some(101),
+            started_at: Some("Mon Jun 29 14:23:01 2026".into()),
+            adopted: true,
+        };
+        let mut service = ServiceProc {
+            name: "web".into(),
+            status: ServiceStatus::Ready,
+            pid: Some(101),
+            port: Some(5173),
+            resolved_command: Some("vite".into()),
+            exit_code: None,
+            logs: VecDeque::new(),
+            started_at: identity.started_at.clone(),
+            adopted: true,
+            external: true,
+            root: Some("/tmp/app".into()),
+            resolved_env: None,
+            restart_count: 0,
+            ready_since: None,
+            cpu: None,
+            mem_bytes: None,
+        };
+        assert!(identity.matches(&service));
+        service.pid = Some(202);
+        assert!(!identity.matches(&service));
+        service.pid = Some(101);
+        service.started_at = Some("Mon Jun 29 14:24:01 2026".into());
+        assert!(!identity.matches(&service));
+        service.started_at = identity.started_at.clone();
+        service.adopted = false;
+        assert!(!identity.matches(&service));
+    }
+
+    #[test]
+    fn adoption_command_matching_respects_script_boundaries() {
+        assert!(command_matches_for_adoption(
+            "npm run dev",
+            "/opt/homebrew/bin/npm run dev -- --port 5173"
+        ));
+        assert!(!command_matches_for_adoption(
+            "npm run dev",
+            "/opt/homebrew/bin/npm run dev:docs -- --port 5174"
+        ));
+        assert!(command_matches_for_adoption(
+            "vite --port ${PORT}",
+            "node /project/node_modules/vite/bin/vite.js --port 5173"
+        ));
+        assert!(command_matches_for_adoption(
+            "node server.js",
+            "/opt/homebrew/bin/node /project/server.js"
+        ));
+        assert!(!command_matches_for_adoption(
+            "next dev",
+            "node /project/nextcloud/dev.js"
+        ));
+    }
+
+    #[test]
+    fn log_health_check_supplies_reader_pattern_with_explicit_override() {
+        let mut svc = ServiceConfig {
+            name: "web".into(),
+            cwd: ".".into(),
+            command: "npm run dev".into(),
+            port: Some(5173),
+            env: BTreeMap::new(),
+            depends_on: vec![],
+            health_check: Some(HealthCheck::Log {
+                pattern: "listening".into(),
+            }),
+            ready_log_pattern: None,
+        };
+        assert_eq!(
+            service_log_ready_pattern(&svc).as_deref(),
+            Some("listening")
+        );
+        svc.ready_log_pattern = Some("explicit ready".into());
+        assert_eq!(
+            service_log_ready_pattern(&svc).as_deref(),
+            Some("explicit ready")
+        );
     }
 
     #[test]
     fn leader_is_shell_catches_terminals() {
-        for s in ["zsh", "-zsh", "/bin/bash", "/usr/bin/fish -i", "login -pf x", "tmux", "sshd: u"]
-        {
+        for s in [
+            "zsh",
+            "-zsh",
+            "/bin/bash",
+            "/usr/bin/fish -i",
+            "login -pf x",
+            "tmux",
+            "sshd: u",
+            "codex app-server",
+            "/Applications/Cursor.app/Contents/MacOS/Cursor",
+            "node /x/@anthropic-ai/claude-code/cli.js",
+        ] {
             assert!(leader_is_shell(s), "{s:?} should read as a shell/login");
         }
-        for s in ["node /x/yarn.js run dev", "next dev -p 3002", "/usr/bin/python3 -m http.server"]
-        {
+        for s in [
+            "node /x/yarn.js run dev",
+            "next dev -p 3002",
+            "/usr/bin/python3 -m http.server",
+        ] {
             assert!(!leader_is_shell(s), "{s:?} should NOT read as a shell");
         }
     }
@@ -1908,7 +3025,11 @@ mod tests {
     fn group_belongs_to_app_refuses_shell_leader() {
         // Even with a real, live pid, a shell-looking leader command is rejected
         // outright (the kill-the-terminal guard) before any cwd/argv inspection.
-        assert!(!group_belongs_to_app(std::process::id(), "/bin/zsh -i", "/"));
+        assert!(!group_belongs_to_app(
+            std::process::id(),
+            "/bin/zsh -i",
+            "/"
+        ));
     }
 
     #[test]
@@ -1928,9 +3049,8 @@ mod tests {
         // Spawn node DIRECTLY (no shell) so the JS needs no shell quoting and
         // node itself is the setsid group leader. Resolve node the way the app
         // does so nvm/Homebrew installs are found regardless of test PATH.
-        let js = format!(
-            "require('http').createServer((q,r)=>r.end('ok')).listen({port},()=>{{}})"
-        );
+        let js =
+            format!("require('http').createServer((q,r)=>r.end('ok')).listen({port},()=>{{}})");
         let node = crate::sysenv::resolve_bin("node")
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "node".to_string());
@@ -1957,15 +3077,18 @@ mod tests {
         }
 
         let good = if listening {
-            detect_external("App", "web", port, &dir_s, None)
+            detect_external("App", "web", "node -e", port, &dir_s, None)
         } else {
             None
         };
         let bad = if listening {
-            detect_external("App", "web", port, "/no/such/project/root", None)
+            detect_external("App", "web", "node -e", port, "/no/such/project/root", None)
         } else {
             None
         };
+        let observed_good = listening && listener_belongs_to_app_observation(port, &dir_s);
+        let observed_bad =
+            listening && listener_belongs_to_app_observation(port, "/no/such/project/root");
 
         // Cleanup before asserting so a failure never leaks the process.
         let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
@@ -1973,6 +3096,14 @@ mod tests {
         let _ = waitable.wait();
 
         assert!(listening, "node test server never bound the port");
+        assert!(
+            observed_good,
+            "observation should corroborate the listener cwd"
+        );
+        assert!(
+            !observed_bad,
+            "observation must reject the wrong project root"
+        );
         let good = good.expect("cwd under root must corroborate");
         assert_eq!(good.pid, pid, "identity must be the group leader");
         assert!(good.foreign, "must be flagged foreign");

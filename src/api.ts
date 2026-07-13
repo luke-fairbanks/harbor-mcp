@@ -9,6 +9,7 @@ import type {
   Detection,
   FixResult,
   LogLine,
+  LocalServerInventory,
   McpInfo,
   ServiceStat,
   StatusEvent,
@@ -16,7 +17,11 @@ import type {
 
 export const api = {
   listApps: () => invoke<AppListItem[]>("list_apps"),
-  appStatus: (app: string) => invoke<AppRunSnapshot | null>("app_status", { app }),
+  appStatus: (app: string) =>
+    invoke<AppRunSnapshot | null>("app_status", { app }),
+  listLocalServers: () => invoke<LocalServerInventory>("list_local_servers"),
+  stopLocalServer: (pid: number, port: number, startedAt: string) =>
+    invoke<void>("stop_local_server", { pid, port, startedAt }),
   startApp: (app: string, profile?: string) =>
     invoke<AppRunSnapshot>("start_app", { app, profile }),
   stopApp: (app: string) => invoke<void>("stop_app", { app }),
@@ -27,6 +32,8 @@ export const api = {
   getLogs: (app: string, service: string, lines?: number) =>
     invoke<LogLine[]>("get_logs", { app, service, lines }),
   registerApp: (config: AppConfig) => invoke<void>("register_app", { config }),
+  approveApp: (app: string, expected: AppConfig) =>
+    invoke<void>("approve_app", { app, expected }),
   updateApp: (app: string, config: AppConfig) =>
     invoke<void>("update_app", { app, config }),
   removeApp: (app: string) => invoke<boolean>("remove_app", { app }),

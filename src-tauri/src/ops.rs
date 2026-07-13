@@ -13,7 +13,22 @@ pub async fn start_app(
         .get_config(app)
         .await
         .ok_or_else(|| format!("no such app: {app}"))?;
+    if !cfg.trusted {
+        return Err(format!(
+            "approval required: review and trust '{app}' in Harbor before its commands can run"
+        ));
+    }
     let profile = profile.unwrap_or("default");
+    if profile != "default" && !cfg.profiles.contains_key(profile) {
+        let available = if cfg.profiles.is_empty() {
+            "default".to_string()
+        } else {
+            cfg.profiles.keys().cloned().collect::<Vec<_>>().join(", ")
+        };
+        return Err(format!(
+            "unknown profile '{profile}' for {app}; available profiles: {available}"
+        ));
+    }
     state
         .supervisor
         .start(&cfg, profile)
@@ -56,7 +71,7 @@ pub async fn stop_all(state: &AppState) -> Result<(), String> {
 /// (to avoid a spawn storm). Best-effort.
 pub async fn start_all(state: &AppState) -> Result<(), String> {
     for cfg in state.list_configs().await {
-        if !state.supervisor.is_running(&cfg.name).await {
+        if cfg.trusted && !state.supervisor.is_running(&cfg.name).await {
             let _ = state.supervisor.start(&cfg, "default").await;
         }
     }

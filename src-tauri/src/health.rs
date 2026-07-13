@@ -40,9 +40,7 @@ async fn http_ok(port: u16, path: &str) -> bool {
     let path = if path.is_empty() { "/" } else { path };
     let fut = async {
         let mut s = TcpStream::connect(("127.0.0.1", port)).await.ok()?;
-        let req = format!(
-            "GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-        );
+        let req = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
         s.write_all(req.as_bytes()).await.ok()?;
         let mut buf = [0u8; 128];
         let n = s.read(&mut buf).await.ok()?;

@@ -8,6 +8,7 @@
 use crate::model::{AppConfig, PersistedRun};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// On-disk shape of `registry.json`.
@@ -35,19 +36,27 @@ pub struct McpSettings {
 
 pub struct Store {
     dir: PathBuf,
+    runs_lock: std::sync::Mutex<()>,
 }
 
 impl Store {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Store { dir: dir.into() }
+        Store {
+            dir: dir.into(),
+            runs_lock: std::sync::Mutex::new(()),
+        }
     }
 
     fn registry_path(&self) -> PathBuf {
         self.dir.join("registry.json")
     }
 
-    fn settings_path(&self) -> PathBuf {
+    pub fn settings_path(&self) -> PathBuf {
         self.dir.join("mcp.json")
+    }
+
+    pub fn bridge_path(&self) -> PathBuf {
+        self.dir.join("harbor-mcp-bridge")
     }
 
     fn runs_path(&self) -> PathBuf {
@@ -56,7 +65,44 @@ impl Store {
 
     fn ensure_dir(&self) -> Result<()> {
         std::fs::create_dir_all(&self.dir)
-            .with_context(|| format!("creating app data dir {}", self.dir.display()))
+            .with_context(|| format!("creating app data dir {}", self.dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("securing app data dir {}", self.dir.display()))?;
+        }
+        Ok(())
+    }
+
+    /// App-data files may contain bearer tokens, environment values, commands,
+    /// and project paths. Write them atomically with owner-only permissions.
+    fn write_private(&self, path: &Path, text: &str) -> Result<()> {
+        self.ensure_dir()?;
+        let tmp = path.with_extension(format!(
+            "{}.tmp",
+            path.extension().and_then(|e| e.to_str()).unwrap_or("json")
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&tmp)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        drop(file);
+        std::fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
+        Ok(())
     }
 
     pub fn load_registry(&self) -> Result<Registry> {
@@ -66,20 +112,15 @@ impl Store {
         }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let reg: Registry = serde_json::from_str(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let reg: Registry =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         Ok(reg)
     }
 
     pub fn save_registry(&self, reg: &Registry) -> Result<()> {
-        self.ensure_dir()?;
         let text = serde_json::to_string_pretty(reg)?;
         let path = self.registry_path();
-        // Write atomically-ish: temp file then rename.
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).with_context(|| format!("renaming into {}", path.display()))?;
-        Ok(())
+        self.write_private(&path, &text)
     }
 
     pub fn load_settings(&self) -> Result<Option<McpSettings>> {
@@ -92,10 +133,8 @@ impl Store {
     }
 
     pub fn save_settings(&self, s: &McpSettings) -> Result<()> {
-        self.ensure_dir()?;
         let text = serde_json::to_string_pretty(s)?;
-        std::fs::write(self.settings_path(), text)?;
-        Ok(())
+        self.write_private(&self.settings_path(), &text)
     }
 
     // ---- runs.json: live-process adoption records ------------------------
@@ -109,45 +148,61 @@ impl Store {
         Ok(serde_json::from_str(&text)?)
     }
 
-    pub fn save_runs(&self, f: &RunsFile) -> Result<()> {
-        self.ensure_dir()?;
+    fn save_runs_unlocked(&self, f: &RunsFile) -> Result<()> {
         let text = serde_json::to_string_pretty(f)?;
         let path = self.runs_path();
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).with_context(|| format!("renaming into {}", path.display()))?;
-        Ok(())
+        self.write_private(&path, &text)
+    }
+
+    pub fn save_runs(&self, f: &RunsFile) -> Result<()> {
+        let _guard = self
+            .runs_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.save_runs_unlocked(f)
     }
 
     /// Record (or replace) one spawned service. Keyed by `(app, service)`.
     pub fn upsert_run(&self, r: PersistedRun) -> Result<()> {
-        let mut f = self.load_runs().unwrap_or_default();
+        let _guard = self
+            .runs_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut f = self.load_runs()?;
         f.runs
             .retain(|e| !(e.app == r.app && e.service == r.service));
         f.runs.push(r);
-        self.save_runs(&f)
+        self.save_runs_unlocked(&f)
     }
 
     /// Drop one service's record (clean exit / adopted process found dead).
     pub fn remove_run(&self, app: &str, service: &str) -> Result<()> {
-        let mut f = self.load_runs().unwrap_or_default();
+        let _guard = self
+            .runs_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut f = self.load_runs()?;
         let before = f.runs.len();
         f.runs.retain(|e| !(e.app == app && e.service == service));
         if f.runs.len() == before {
             return Ok(());
         }
-        self.save_runs(&f)
+        self.save_runs_unlocked(&f)
     }
 
     /// Drop every record for an app (a deliberate Stop tears the whole app down).
     pub fn remove_app_runs(&self, app: &str) -> Result<()> {
-        let mut f = self.load_runs().unwrap_or_default();
+        let _guard = self
+            .runs_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut f = self.load_runs()?;
         let before = f.runs.len();
         f.runs.retain(|e| e.app != app);
         if f.runs.len() == before {
             return Ok(());
         }
-        self.save_runs(&f)
+        self.save_runs_unlocked(&f)
     }
 }
 
@@ -166,7 +221,13 @@ pub fn import_harbor_json(path: &Path, default_root: &Path) -> Result<AppConfig>
 
 /// Write an [`AppConfig`] back out as a shareable `harbor.json`.
 pub fn export_harbor_json(cfg: &AppConfig, path: &Path) -> Result<()> {
-    let text = serde_json::to_string_pretty(cfg)?;
+    let mut value = serde_json::to_value(cfg)?;
+    if let Some(obj) = value.as_object_mut() {
+        // Trust is machine-local approval state and must never travel with a
+        // shareable config.
+        obj.remove("trusted");
+    }
+    let text = serde_json::to_string_pretty(&value)?;
     std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
@@ -222,54 +283,33 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
 
-/// The QuizletLocal seed config (DESIGN.md §10/§13). Used on first run so the
-/// MVP loop is demonstrable immediately. `root` is filled in by the caller from
-/// the user's home dir.
-pub fn quizletlocal_seed(root: String) -> AppConfig {
-    use crate::model::{HealthCheck, ServiceConfig};
-
-    let server = ServiceConfig {
-        name: "server".to_string(),
-        cwd: ".".to_string(),
-        command: "node server.js".to_string(),
-        port: Some(4321),
-        env: BTreeMap::from([("PORT".to_string(), "${PORT}".to_string())]),
-        depends_on: vec![],
-        health_check: Some(HealthCheck::Http {
-            path: "/".to_string(),
-            expect: Some("2xx-3xx".to_string()),
-        }),
-        ready_log_pattern: Some("running".to_string()),
-    };
-
-    // Dev profile adds a Vite `web` service that proxies the server's port.
-    let web = ServiceConfig {
-        name: "web".to_string(),
-        cwd: ".".to_string(),
-        command: "npx vite --port ${PORT} --strictPort".to_string(),
-        port: Some(5173),
-        env: BTreeMap::from([(
-            "VITE_API_TARGET".to_string(),
-            "http://127.0.0.1:${services.server.port}".to_string(),
-        )]),
-        depends_on: vec!["server".to_string()],
-        health_check: Some(HealthCheck::Tcp),
-        ready_log_pattern: Some("ready in".to_string()),
-    };
-
-    AppConfig {
-        name: "QuizletLocal".to_string(),
-        root,
-        services: vec![server, web],
-        profiles: BTreeMap::from([
-            ("default".to_string(), vec!["server".to_string()]),
-            (
-                "dev".to_string(),
-                vec!["server".to_string(), "web".to_string()],
-            ),
-        ]),
-        auto_restart: false,
+    #[cfg(unix)]
+    #[test]
+    fn app_data_and_mcp_token_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("harbor-private-store-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::new(&dir);
+        store
+            .save_settings(&McpSettings {
+                token: "secret".into(),
+                port: 7777,
+            })
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(store.settings_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

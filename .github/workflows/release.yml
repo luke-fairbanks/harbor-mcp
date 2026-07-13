@@ -2,7 +2,7 @@ name: Release
 
 # Cut a release by pushing a version tag that matches the version in
 # src-tauri/tauri.conf.json, e.g.:
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag v0.2.0 && git push origin v0.2.0
 # Builds a UNIVERSAL (Intel + Apple Silicon) .dmg and attaches it to a draft
 # GitHub Release. If the Apple signing secrets are configured (see
 # DISTRIBUTING.md) the build is code-signed + notarized; otherwise it ships
@@ -33,8 +33,46 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Verify release version matches tag
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const tag = process.env.GITHUB_REF_NAME.replace(/^v/, "");
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+          const packageLock = JSON.parse(fs.readFileSync("package-lock.json", "utf8")).version;
+          const tauri = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
+          const cargoText = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
+          const cargo = cargoText.match(/^version = "([^"]+)"/m)?.[1];
+          const versions = { tag, package: pkg, packageLock, tauri, cargo };
+          if (!cargo || new Set(Object.values(versions)).size !== 1) {
+            console.error("Release version mismatch:", versions);
+            process.exit(1);
+          }
+          console.log(`Release version ${tag} is consistent.`);
+          NODE
+
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Verify frontend
+        run: npm run build
+
+      - name: Verify Rust formatting
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Lint Rust core
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Verify Rust core and MCP tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Verify bundled MCP launcher syntax
+        run: |
+          awk '/^const MCP_BRIDGE_SCRIPT:/{on=1; next} on && /^"#;/{exit} on {print}' \
+            src-tauri/src/commands.rs | sh -n
 
       # Decide signed-vs-unsigned WITHOUT leaving an empty APPLE_CERTIFICATE in
       # the build env — an empty-but-present var makes Tauri try (and fail) to sign.

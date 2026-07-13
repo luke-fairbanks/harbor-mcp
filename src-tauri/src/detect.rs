@@ -166,9 +166,7 @@ pub fn detect(path: &Path) -> Detection {
             .map(|p| p.get("workspaces").is_some())
             .unwrap_or(false)
     {
-        notes.push(
-            "monorepo workspaces detected — register sub-packages individually".to_string(),
-        );
+        notes.push("monorepo workspaces detected — register sub-packages individually".to_string());
     }
 
     // ---- non-JS frameworks (only when package.json produced nothing) -----
@@ -207,7 +205,9 @@ pub fn detect(path: &Path) -> Detection {
     // ---- docker-compose / Makefile (noted, not auto-imported) -----------
     for f in ["docker-compose.yml", "docker-compose.yaml", "compose.yaml"] {
         if path.join(f).exists() {
-            notes.push(format!("{f} present — review services manually (not auto-imported)"));
+            notes.push(format!(
+                "{f} present — review services manually (not auto-imported)"
+            ));
         }
     }
     if path.join("Makefile").exists() {
@@ -258,6 +258,7 @@ pub fn detect(path: &Path) -> Detection {
             services,
             profiles,
             auto_restart: false,
+            trusted: true,
         },
         notes,
     }
@@ -413,7 +414,8 @@ mod tests {
     struct Tmp(std::path::PathBuf);
     impl Tmp {
         fn new(tag: &str) -> Self {
-            let d = std::env::temp_dir().join(format!("harbor-detect-{}-{tag}", std::process::id()));
+            let d =
+                std::env::temp_dir().join(format!("harbor-detect-{}-{tag}", std::process::id()));
             let _ = std::fs::remove_dir_all(&d);
             std::fs::create_dir_all(&d).unwrap();
             Tmp(d)
@@ -434,7 +436,11 @@ mod tests {
     }
 
     fn svc<'a>(d: &'a Detection, name: &str) -> &'a ServiceConfig {
-        d.proposed.services.iter().find(|s| s.name == name).expect("service present")
+        d.proposed
+            .services
+            .iter()
+            .find(|s| s.name == name)
+            .expect("service present")
     }
 
     #[test]
@@ -454,7 +460,8 @@ mod tests {
     #[test]
     fn detects_django_only_when_js_empty() {
         let t = Tmp::new("django");
-        t.write("manage.py", "# django").write("requirements.txt", "Django==5.0");
+        t.write("manage.py", "# django")
+            .write("requirements.txt", "Django==5.0");
         let d = detect(&t.0);
         let web = svc(&d, "web");
         assert!(web.command.contains("manage.py runserver"));
@@ -491,6 +498,10 @@ mod tests {
         let d = detect(&t.0);
         assert_eq!(svc(&d, "web").command, "npm run dev");
         // No python service got added.
-        assert!(d.proposed.services.iter().all(|s| !s.command.contains("flask")));
+        assert!(d
+            .proposed
+            .services
+            .iter()
+            .all(|s| !s.command.contains("flask")));
     }
 }

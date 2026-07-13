@@ -21,7 +21,12 @@ import {
   TrashIcon,
 } from "@radix-ui/react-icons";
 import { AnimatePresence, motion } from "framer-motion";
-import type { AppListItem, AppRunSnapshot, LogLine, ServiceRun } from "../types";
+import type {
+  AppListItem,
+  AppRunSnapshot,
+  LogLine,
+  ServiceRun,
+} from "../types";
 import { api, formatBytes } from "../api";
 import { StatusBadge, StatusDot } from "./StatusDot";
 import { LogPane } from "./LogPane";
@@ -45,10 +50,10 @@ export function AppDetail({
   const cfg = item.config;
   const profiles = Object.keys(cfg.profiles);
   const [profile, setProfile] = useState(
-    profiles.includes("default") ? "default" : profiles[0] ?? "default",
+    profiles.includes("default") ? "default" : (profiles[0] ?? "default"),
   );
   const [busy, setBusy] = useState<
-    null | "start" | "stop" | "restart" | "config"
+    null | "start" | "stop" | "restart" | "config" | "approve"
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -57,9 +62,11 @@ export function AppDetail({
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [fixOpen, setFixOpen] = useState(false);
   const [fixBusy, setFixBusy] = useState(false);
-  const [fixResult, setFixResult] = useState<
-    { agent?: string; text: string; copied?: boolean } | null
-  >(null);
+  const [fixResult, setFixResult] = useState<{
+    agent?: string;
+    text: string;
+    copied?: boolean;
+  } | null>(null);
 
   const running = run?.running ?? false;
   const hasExternal = run?.services.some((s) => s.external) ?? false;
@@ -69,7 +76,8 @@ export function AppDetail({
     return m;
   }, [run]);
 
-  const profileServices = cfg.profiles[profile] ?? cfg.services.map((s) => s.name);
+  const profileServices =
+    cfg.profiles[profile] ?? cfg.services.map((s) => s.name);
   const activeServices = (
     running ? run!.services.map((s) => s.name) : profileServices
   ).filter((n, i, a) => a.indexOf(n) === i);
@@ -100,6 +108,19 @@ export function AppDetail({
     } finally {
       setBusy(null);
       onChanged();
+    }
+  }
+
+  async function approveCommands() {
+    setBusy("approve");
+    setError(null);
+    try {
+      await api.approveApp(cfg.name, cfg);
+      onChanged();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -204,8 +225,10 @@ export function AppDetail({
               >
                 <button
                   className="run-btn"
-                  disabled={busy !== null}
-                  onClick={() => act("start", () => api.startApp(cfg.name, profile))}
+                  disabled={busy !== null || cfg.trusted === false}
+                  onClick={() =>
+                    act("start", () => api.startApp(cfg.name, profile))
+                  }
                 >
                   <PlayIcon /> {busy === "start" ? "Starting…" : "Start"}
                 </button>
@@ -258,6 +281,29 @@ export function AppDetail({
       </div>
 
       <div className="detail-body">
+        {cfg.trusted === false && (
+          <div className="trust-banner">
+            <div>
+              <div className="trust-title">
+                Review required before this app can run
+              </div>
+              <div className="trust-copy">
+                An AI agent registered or changed this config. Check the
+                commands below, then approve them once. Harbor will not execute
+                an unreviewed config.
+              </div>
+            </div>
+            <Button
+              size="2"
+              variant="solid"
+              disabled={busy !== null}
+              onClick={approveCommands}
+            >
+              {busy === "approve" ? <Spinner size="1" /> : null}
+              Approve commands
+            </Button>
+          </div>
+        )}
         {(error || note) && (
           <div
             className="mono"
@@ -287,12 +333,17 @@ export function AppDetail({
         )}
 
         <div className="svc-grid">
-          {activeServices.map((name) => {
+          {(cfg.trusted === false
+            ? cfg.services.map((service) => service.name)
+            : activeServices
+          ).map((name) => {
             const sc = cfg.services.find((s) => s.name === name);
             const sr = runByName[name];
             const status = sr?.status ?? "stopped";
             const errored =
-              (status === "exited" && sr?.exitCode != null && sr.exitCode !== 0) ||
+              (status === "exited" &&
+                sr?.exitCode != null &&
+                sr.exitCode !== 0) ||
               status === "unhealthy";
             const errLine = errored ? lastErrorLine(name) : null;
             return (
@@ -322,16 +373,33 @@ export function AppDetail({
                     <StatusBadge status={status} />
                   </span>
                 </div>
-                <div className="svc-cmd">
-                  {sr?.resolvedCommand ?? sc?.command ?? ""}
+                <div
+                  className={`svc-cmd ${cfg.trusted === false ? "trust-command" : ""}`}
+                >
+                  {cfg.trusted === false
+                    ? (sc?.command ?? "")
+                    : (sr?.resolvedCommand ?? sc?.command ?? "")}
                 </div>
+                {cfg.trusted === false && sc && (
+                  <div className="trust-command-details mono">
+                    <span>cwd: {sc.cwd || "."}</span>
+                    {sc.port != null && <span>port: {sc.port}</span>}
+                    {Object.entries(sc.env).map(([key, value]) => (
+                      <span key={key}>
+                        {key}={value}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <div className="svc-meta">
                   {sr?.port != null &&
                     (status === "ready" ? (
                       <button
                         className="svc-url"
                         title="Open in browser"
-                        onClick={() => api.openUrl(`http://localhost:${sr.port}`)}
+                        onClick={() =>
+                          api.openUrl(`http://localhost:${sr.port}`)
+                        }
                       >
                         localhost:{sr.port}
                         <ExternalLinkIcon width={11} height={11} />
@@ -350,8 +418,8 @@ export function AppDetail({
                         className="svc-res"
                         title="Recent CPU% and resident memory for the whole process group"
                       >
-                        {sr.cpu >= 10 ? sr.cpu.toFixed(0) : sr.cpu.toFixed(1)}% ·{" "}
-                        {formatBytes(sr.memBytes)}
+                        {sr.cpu >= 10 ? sr.cpu.toFixed(0) : sr.cpu.toFixed(1)}%
+                        · {formatBytes(sr.memBytes)}
                       </span>
                     )}
                   {sc?.dependsOn && sc.dependsOn.length > 0 && (
@@ -409,14 +477,14 @@ export function AppDetail({
           hasExternal ? (
             <>
               This server was started <b>outside Harbor</b>. Stopping sends{" "}
-              <Code>SIGTERM</Code> then <Code>SIGKILL</Code> to its entire process
-              group — the terminal command that launched it and every child
-              process will be terminated.
+              <Code>SIGTERM</Code> then <Code>SIGKILL</Code> to its entire
+              process group — the terminal command that launched it and every
+              child process will be terminated.
             </>
           ) : (
             <>
-              This sends <Code>SIGTERM</Code> then <Code>SIGKILL</Code> to the whole
-              process tree.
+              This sends <Code>SIGTERM</Code> then <Code>SIGKILL</Code> to the
+              whole process tree.
             </>
           )
         }
@@ -447,16 +515,20 @@ export function AppDetail({
                 : `${fixResult?.agent ?? "AI"} suggests`}
           </Dialog.Title>
           {fixBusy ? (
-            <Flex align="center" gap="3" style={{ padding: "20px 4px", color: "var(--text-2)" }}>
+            <Flex
+              align="center"
+              gap="3"
+              style={{ padding: "20px 4px", color: "var(--text-2)" }}
+            >
               <Spinner /> Asking your AI agent to diagnose the error…
             </Flex>
           ) : fixResult ? (
             <>
               {fixResult.copied && (
                 <Dialog.Description size="2" color="gray" mb="2">
-                  No Claude or Codex CLI was found locally. A tailored prompt was
-                  copied to your clipboard — paste it into Claude or Codex (with
-                  Harbor connected, it can read the logs over MCP).
+                  No Claude or Codex CLI was found locally. A tailored prompt
+                  was copied to your clipboard — paste it into Claude or Codex
+                  (with Harbor connected, it can read the logs over MCP).
                 </Dialog.Description>
               )}
               <div className="fix-response">{fixResult.text}</div>

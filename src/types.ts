@@ -1,11 +1,7 @@
 // Wire types — mirror the serde output of src-tauri/src/model.rs (camelCase).
 
 export type ServiceStatus =
-  | "stopped"
-  | "starting"
-  | "ready"
-  | "unhealthy"
-  | "exited";
+  "stopped" | "starting" | "ready" | "unhealthy" | "exited";
 
 export type HealthCheck =
   | { type: "http"; path: string; expect?: string }
@@ -31,6 +27,8 @@ export interface AppConfig {
   profiles: Record<string, string[]>;
   /** Auto-restart Harbor-spawned services that crash (bounded). Default off. */
   autoRestart?: boolean;
+  /** Commands may run only after a person approves this local config. */
+  trusted?: boolean;
 }
 
 export interface ServiceRun {
@@ -101,6 +99,8 @@ export interface McpInfo {
   url: string;
   port: number;
   token: string;
+  healthy: boolean;
+  version: string;
   claudeAddCommand: string;
   desktopJson: string;
 }
@@ -122,4 +122,41 @@ export interface AgentStatus {
 export interface FixResult {
   agent: string;
   response: string;
+}
+
+export interface LocalServer {
+  pid: number;
+  leaderPid: number;
+  port: number;
+  addresses: string[];
+  networkExposed: boolean;
+  process: string;
+  command: string;
+  cwd?: string;
+  projectRoot?: string;
+  displayName: string;
+  kind: string;
+  startedAt: string;
+  url: string;
+  httpStatus?: number;
+  pageTitle?: string;
+  serverHeader?: string;
+  matchedApp?: string;
+  matchedService?: string;
+  matchReason?: string;
+  tracked: boolean;
+  external: boolean;
+  safeToStop: boolean;
+  likelyDev: boolean;
+  duplicateCount: number;
+  harborInternal: boolean;
+}
+
+export interface LocalServerInventory {
+  scannedAt: number;
+  servers: LocalServer[];
+  devCount: number;
+  otherCount: number;
+  mappedCount: number;
+  duplicateCount: number;
 }

@@ -6,7 +6,7 @@
 //! `tower::Service` we nest at `/mcp`. A bearer-token middleware guards it.
 
 use crate::detect;
-use crate::model::ServiceStatus;
+use crate::model::{AppConfig, ServiceStatus};
 use crate::ops;
 use crate::state::AppState;
 use anyhow::Result;
@@ -66,7 +66,18 @@ struct RegisterArg {
     /// Full app config JSON: { name, root, services: [{ name, cwd, command,
     /// port?, env, dependsOn, healthCheck?, readyLogPattern? }], profiles }.
     /// Tip: call detect_app first and pass (a corrected) `proposed` here.
-    config: Value,
+    config: AppConfig,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct StopLocalArg {
+    /// Process-group leader PID returned by list_local_servers.
+    pid: u32,
+    /// Listening port returned by list_local_servers.
+    port: u16,
+    /// Exact startedAt identity token returned by list_local_servers.
+    started_at: String,
 }
 
 /// Uniform object-rooted output wrapper. rmcp requires a tool's `outputSchema`
@@ -101,7 +112,16 @@ impl HarborMcp {
         }
     }
 
-    #[rmcp::tool(description = "List all registered apps with their current run status and ports")]
+    #[rmcp::tool(
+        description = "List all registered apps with their current run status and ports",
+        annotations(
+            title = "List Harbor apps",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     async fn list_apps(&self) -> Result<Json<JsonOut>, String> {
         let mut apps = Vec::new();
         for cfg in self.state.list_configs().await {
@@ -119,8 +139,20 @@ impl HarborMcp {
         Ok(out(json!({ "apps": apps })))
     }
 
-    #[rmcp::tool(description = "Per-service state, resolved ports, and the port plan for one app")]
-    async fn app_status(&self, Parameters(AppArg { app }): Parameters<AppArg>) -> Result<Json<JsonOut>, String> {
+    #[rmcp::tool(
+        description = "Per-service state, resolved ports, and the port plan for one app",
+        annotations(
+            title = "Inspect app status",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn app_status(
+        &self,
+        Parameters(AppArg { app }): Parameters<AppArg>,
+    ) -> Result<Json<JsonOut>, String> {
         match self.state.supervisor.snapshot(&app).await {
             Some(snap) => Ok(out(serde_json::to_value(snap).map_err(|e| e.to_string())?)),
             None => {
@@ -136,30 +168,100 @@ impl HarborMcp {
         }
     }
 
-    #[rmcp::tool(description = "Start an app under a profile; resolves ports, spawns services in dependency order, returns the port plan")]
-    async fn start_app(&self, Parameters(StartArg { app, profile }): Parameters<StartArg>) -> Result<Json<JsonOut>, String> {
+    #[rmcp::tool(
+        description = "Start an approved app under a profile; reuses a matching external server before allocating, then returns the port plan",
+        annotations(
+            title = "Start app",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn start_app(
+        &self,
+        Parameters(StartArg { app, profile }): Parameters<StartArg>,
+    ) -> Result<Json<JsonOut>, String> {
         let snap = ops::start_app(&self.state, &app, profile.as_deref()).await?;
         Ok(out(serde_json::to_value(snap).map_err(|e| e.to_string())?))
     }
 
-    #[rmcp::tool(description = "Stop an app: SIGTERM then SIGKILL its whole process tree, freeing ports")]
-    async fn stop_app(&self, Parameters(AppArg { app }): Parameters<AppArg>) -> Result<Json<JsonOut>, String> {
-        ops::stop_app(&self.state, &app).await?;
+    #[rmcp::tool(
+        description = "Stop an app: SIGTERM then SIGKILL its managed process tree, freeing ports",
+        annotations(
+            title = "Stop app",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn stop_app(
+        &self,
+        Parameters(AppArg { app }): Parameters<AppArg>,
+    ) -> Result<Json<JsonOut>, String> {
+        self.state
+            .supervisor
+            .stop_managed_only(&app)
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(out(json!({ "app": app, "stopped": true })))
     }
 
-    #[rmcp::tool(description = "Restart an app: stop it, then start it again under the same (or given) profile")]
-    async fn restart_app(&self, Parameters(StartArg { app, profile }): Parameters<StartArg>) -> Result<Json<JsonOut>, String> {
-        let snap = ops::restart_app(&self.state, &app, profile.as_deref()).await?;
+    #[rmcp::tool(
+        description = "Restart an app under the same (or given) profile",
+        annotations(
+            title = "Restart app",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn restart_app(
+        &self,
+        Parameters(StartArg { app, profile }): Parameters<StartArg>,
+    ) -> Result<Json<JsonOut>, String> {
+        let selected_profile = match profile {
+            Some(profile) => Some(profile),
+            None => self
+                .state
+                .supervisor
+                .snapshot(&app)
+                .await
+                .and_then(|snapshot| snapshot.profile),
+        };
+        self.state
+            .supervisor
+            .stop_managed_only(&app)
+            .await
+            .map_err(|error| error.to_string())?;
+        let snap = ops::start_app(&self.state, &app, selected_profile.as_deref()).await?;
         Ok(out(serde_json::to_value(snap).map_err(|e| e.to_string())?))
     }
 
-    #[rmcp::tool(description = "Tail recent captured logs for a service")]
-    async fn get_logs(&self, Parameters(LogsArg { app, service, lines }): Parameters<LogsArg>) -> Result<Json<JsonOut>, String> {
+    #[rmcp::tool(
+        description = "Tail recent captured logs for a service",
+        annotations(
+            title = "Read service logs",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn get_logs(
+        &self,
+        Parameters(LogsArg {
+            app,
+            service,
+            lines,
+        }): Parameters<LogsArg>,
+    ) -> Result<Json<JsonOut>, String> {
         let logs = self
             .state
             .supervisor
-            .logs(&app, &service, lines.unwrap_or(200))
+            .logs(&app, &service, lines.unwrap_or(200).min(2_000))
             .await;
         Ok(out(json!({
             "app": app,
@@ -168,11 +270,26 @@ impl HarborMcp {
         })))
     }
 
-    #[rmcp::tool(description = "Scan a project folder and propose a service config (does not save)")]
-    async fn detect_app(&self, Parameters(DetectArg { path }): Parameters<DetectArg>) -> Result<Json<JsonOut>, String> {
+    #[rmcp::tool(
+        description = "Scan a project folder and propose a service config (does not save)",
+        annotations(
+            title = "Detect project config",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn detect_app(
+        &self,
+        Parameters(DetectArg { path }): Parameters<DetectArg>,
+    ) -> Result<Json<JsonOut>, String> {
         let p = std::path::PathBuf::from(&path);
         if !p.exists() {
             return Err(format!("path does not exist: {path}"));
+        }
+        if !p.is_dir() {
+            return Err(format!("path is not a directory: {path}"));
         }
         let det = detect::detect(&p);
         Ok(out(serde_json::to_value(det).map_err(|e| e.to_string())?))
@@ -181,17 +298,97 @@ impl HarborMcp {
     #[rmcp::tool(
         description = "Register (or update) an app config in Harbor. Saves it to the registry; \
                        does NOT start it. Pass the full config JSON (e.g. detect_app's proposed, \
-                       corrected as needed)."
+                       corrected as needed). Configs supplied by an agent require a person to \
+                       approve their commands in Harbor before start_app can execute them.",
+        annotations(
+            title = "Register app config",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn register_app(
         &self,
         Parameters(RegisterArg { config }): Parameters<RegisterArg>,
     ) -> Result<Json<JsonOut>, String> {
-        let cfg: crate::model::AppConfig =
-            serde_json::from_value(config).map_err(|e| format!("invalid config: {e}"))?;
+        let mut cfg = config;
+        let _lifecycle = self.state.supervisor.lock_lifecycle(&cfg.name).await;
+        if self.state.supervisor.is_running(&cfg.name).await {
+            return Err("stop the running app before replacing its config".to_string());
+        }
+        // Trust is never accepted from an MCP payload; only the local UI can
+        // approve executable commands.
+        cfg.trusted = false;
         let name = cfg.name.clone();
         self.state.upsert(cfg).await.map_err(|e| e.to_string())?;
-        Ok(out(json!({ "registered": name })))
+        Ok(out(json!({ "registered": name, "approvalRequired": true })))
+    }
+
+    #[rmcp::tool(
+        description = "Inventory local TCP servers, including unknown and duplicate project runs. Returns PID/start identity, command, cwd, HTTP title, Harbor match evidence, and whether safe cleanup is available. Observation only.",
+        annotations(
+            title = "List local servers",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn list_local_servers(&self) -> Result<Json<JsonOut>, String> {
+        let configs = self.state.list_configs().await;
+        let tracked = self.state.supervisor.tracked_servers().await;
+        let inventory = crate::discovery::scan(&configs, &tracked, self.state.mcp.port)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(out(
+            serde_json::to_value(inventory).map_err(|e| e.to_string())?
+        ))
+    }
+
+    #[rmcp::tool(
+        description = "Stop one untracked local server previously returned with safeToStop=true. Requires the exact leader PID, listening port, and startedAt token; refuses stale identity, shells, terminals, IDEs, coding agents, Harbor, and Harbor-managed processes.",
+        annotations(
+            title = "Stop untracked local server",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn stop_local_server(
+        &self,
+        Parameters(StopLocalArg {
+            pid,
+            port,
+            started_at,
+        }): Parameters<StopLocalArg>,
+    ) -> Result<Json<JsonOut>, String> {
+        if self.state.supervisor.owns_pid(pid).await {
+            return Err("process is managed by Harbor; use stop_app instead".to_string());
+        }
+        crate::discovery::stop_untracked(pid, &started_at, port)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(out(json!({ "pid": pid, "stopped": true })))
+    }
+
+    #[rmcp::tool(
+        description = "Open a running app's primary local URL in the default browser",
+        annotations(
+            title = "Open app in browser",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn open_app(
+        &self,
+        Parameters(AppArg { app }): Parameters<AppArg>,
+    ) -> Result<Json<JsonOut>, String> {
+        let url = ops::open_app(&self.state, &app).await?;
+        Ok(out(json!({ "app": app, "url": url })))
     }
 }
 
@@ -200,12 +397,21 @@ impl ServerHandler for HarborMcp {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         use rmcp::model::*;
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::from_build_env())
+            .with_server_info(
+                Implementation::new("harbor", env!("CARGO_PKG_VERSION"))
+                    .with_title("Harbor")
+                    .with_description(
+                        "Local development server discovery, orchestration, cleanup, and diagnostics",
+                    )
+                    .with_website_url("https://github.com/luke-fairbanks/harbor-mcp"),
+            )
             .with_instructions(
-                "Harbor: registers local apps and runs their services with automatic port \
-                 allocation. Use list_apps/app_status to inspect, detect_app to scan a folder \
-                 and register_app to save a config, start_app/stop_app to control lifecycle, \
-                 get_logs to debug."
+                "Harbor is the local runtime control plane. Start with list_local_servers to \
+                 identify already-running and duplicate project servers, then list_apps/app_status. \
+                 Use detect_app + register_app for new folders; agent-registered commands require \
+                 local approval in Harbor before start_app. Prefer stop_app for managed apps. Only \
+                 use stop_local_server when list_local_servers returned safeToStop=true, passing \
+                 its exact pid, port, and startedAt identity. Use get_logs to debug."
                     .to_string(),
             )
     }
@@ -252,42 +458,97 @@ async fn auth_mw(
 
 // ---- router + serve -------------------------------------------------------
 
-/// Build the axum router: `/health` (open) + `/mcp` (bearer-guarded MCP).
+/// Build the axum router: bearer authentication protects both `/health` and
+/// `/mcp`, so a process merely occupying the remembered port cannot impersonate
+/// Harbor's readiness route.
 pub fn build_router(state: Arc<AppState>, token: String) -> Router {
     let factory_state = state.clone();
+    let transport_config = StreamableHttpServerConfig::default().with_allowed_origins([
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://[::1]",
+    ]);
     let mcp_service: StreamableHttpService<HarborMcp, LocalSessionManager> =
         StreamableHttpService::new(
             move || Ok(HarborMcp::new(factory_state.clone())),
             LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default(),
+            transport_config,
         );
 
     let protected = Router::new()
+        .route("/health", get(|| async { "Harbor MCP OK" }))
         .nest_service("/mcp", mcp_service)
         .layer(middleware::from_fn_with_state(Auth { token }, auth_mw));
 
-    Router::new()
-        .route("/health", get(|| async { "Harbor MCP OK" }))
-        .merge(protected)
+    Router::new().merge(protected)
 }
 
-/// Bind `127.0.0.1:port` and serve forever. The caller picks a free port up
-/// front (see `pick_free_port`).
-pub async fn serve(state: Arc<AppState>, token: String, port: u16) -> Result<()> {
+/// Serve on the loopback listener reserved during app setup. Holding the socket
+/// from selection through axum startup removes the check-then-bind race.
+pub async fn serve_on(
+    state: Arc<AppState>,
+    token: String,
+    listener: std::net::TcpListener,
+) -> Result<()> {
     let router = build_router(state, token);
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::from_std(listener)?;
     axum::serve(listener, router).await?;
     Ok(())
 }
 
-/// Choose a bindable port for the MCP server, starting at `preferred` and
-/// scanning upward. Used at startup so the persisted port is always live.
-pub fn pick_free_port(preferred: u16) -> u16 {
-    for p in preferred..preferred.saturating_add(100) {
-        if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
-            return p;
+/// Bind and retain a loopback listener, scanning upward from the preferred port.
+pub fn bind_listener(preferred: u16) -> Result<(u16, std::net::TcpListener)> {
+    if preferred == 0 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        let selected = listener.local_addr()?.port();
+        listener.set_nonblocking(true)?;
+        return Ok((selected, listener));
+    }
+
+    for offset in 0..100u16 {
+        let Some(p) = preferred.checked_add(offset) else {
+            break;
+        };
+        if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", p)) {
+            listener.set_nonblocking(true)?;
+            return Ok((p, listener));
         }
     }
-    preferred
+    Err(anyhow::anyhow!(
+        "no loopback port available for Harbor MCP near {preferred}"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binding_retains_the_selected_socket_and_skips_busy_port() {
+        let busy = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = busy.local_addr().unwrap().port();
+        if port == u16::MAX {
+            return;
+        }
+        let (selected, reserved) = bind_listener(port).unwrap();
+        assert_ne!(selected, port);
+        assert_eq!(reserved.local_addr().unwrap().port(), selected);
+        assert!(std::net::TcpListener::bind(("127.0.0.1", selected)).is_err());
+    }
+
+    #[test]
+    fn binding_port_zero_reports_the_kernel_selected_port() {
+        let (selected, reserved) = bind_listener(0).unwrap();
+        assert_ne!(selected, 0);
+        assert_eq!(reserved.local_addr().unwrap().port(), selected);
+    }
+
+    #[test]
+    fn bearer_parser_requires_the_exact_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Bearer secret-token".parse().unwrap());
+        assert_eq!(bearer(&headers), Some("secret-token"));
+        headers.insert(AUTHORIZATION, "Basic secret-token".parse().unwrap());
+        assert_eq!(bearer(&headers), None);
+    }
 }

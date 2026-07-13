@@ -3,6 +3,7 @@
 
 mod commands;
 mod detect;
+mod discovery;
 mod health;
 mod mcp;
 mod model;
@@ -35,6 +36,15 @@ fn new_token() -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // This must be the first plugin registered so duplicate launches are
+        // intercepted before any other plugin initialization can run.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -50,44 +60,33 @@ pub fn run() {
             let handle = app.handle().clone();
 
             // --- app data dir + config store ---
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .expect("resolve app data dir");
+            let data_dir = app.path().app_data_dir().expect("resolve app data dir");
             // Shared with the supervisor, which persists/reads `runs.json` to
             // re-adopt servers left running by a previous session.
             let store = Arc::new(Store::new(&data_dir));
 
-            // --- registry: load, or seed QuizletLocal on first run ---
-            let mut registry = store.load_registry().unwrap_or_default().apps;
-            if registry.is_empty() {
-                if let Ok(home) = std::env::var("HOME") {
-                    let ql = std::path::Path::new(&home).join("Desktop/QuizletLocal");
-                    if ql.exists() {
-                        let cfg = store::quizletlocal_seed(ql.to_string_lossy().into_owned());
-                        registry.insert(cfg.name.clone(), cfg);
-                        let snapshot = store::Registry {
-                            apps: registry.clone(),
-                        };
-                        let _ = store.save_registry(&snapshot);
-                        eprintln!("[harbor] seeded QuizletLocal from {}", ql.display());
-                    }
-                }
-            }
+            // --- registry: an empty first run enters folder onboarding ---
+            let registry = store.load_registry()?.apps;
 
-            // --- MCP settings: token (persisted) + a currently-bindable port ---
-            let mut mcp = match store.load_settings() {
-                Ok(Some(s)) => s,
-                _ => McpSettings {
-                    token: new_token(),
-                    port: DEFAULT_MCP_PORT,
-                },
+            // Keep the preferred port, but rotate the bearer token every launch.
+            // Restart-safe clients read mcp.json through the bridge; a token
+            // observed from a stale listener while Harbor is down is therefore
+            // invalid by the time Harbor serves requests again.
+            let preferred_port = store
+                .load_settings()
+                .ok()
+                .flatten()
+                .map(|settings| settings.port)
+                .unwrap_or(DEFAULT_MCP_PORT);
+            let mut mcp = McpSettings {
+                token: new_token(),
+                port: preferred_port,
             };
-            let live_port = mcp::pick_free_port(mcp.port);
+            let (live_port, mcp_listener) = mcp::bind_listener(mcp.port)?;
             if live_port != mcp.port {
                 mcp.port = live_port;
             }
-            let _ = store.save_settings(&mcp);
+            store.save_settings(&mcp)?;
             eprintln!(
                 "[harbor] MCP server → http://127.0.0.1:{}/mcp (token {}…)",
                 mcp.port,
@@ -99,7 +98,12 @@ pub fn run() {
             // reads live, possibly-edited config at crash time.
             let registry = Arc::new(tokio::sync::RwLock::new(registry));
             let supervisor = Supervisor::new(handle.clone(), store.clone(), registry.clone());
-            let app_state = Arc::new(AppState::new(store.clone(), registry, supervisor, mcp.clone()));
+            let app_state = Arc::new(AppState::new(
+                store.clone(),
+                registry,
+                supervisor,
+                mcp.clone(),
+            ));
             app.manage(app_state.clone());
 
             // Ask for notification permission up front (non-blocking) so crash
@@ -142,9 +146,8 @@ pub fn run() {
             // --- host the MCP server on Tauri's tokio runtime ---
             let server_state = app_state.clone();
             let token = mcp.token.clone();
-            let port = mcp.port;
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = mcp::serve(server_state, token, port).await {
+                if let Err(e) = mcp::serve_on(server_state, token, mcp_listener).await {
                     eprintln!("[harbor] MCP server stopped: {e}");
                 }
             });
@@ -165,10 +168,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_apps,
             commands::app_status,
+            commands::list_local_servers,
+            commands::stop_local_server,
             commands::start_app,
             commands::stop_app,
             commands::get_logs,
             commands::register_app,
+            commands::approve_app,
             commands::update_app,
             commands::remove_app,
             commands::set_env,

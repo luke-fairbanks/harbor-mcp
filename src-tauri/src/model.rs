@@ -9,11 +9,12 @@
 //! Field names use `camelCase` on the wire (via `rename`) so they read naturally
 //! from both TypeScript and the `harbor.json` schema in DESIGN.md §5.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// A registered project folder and the services it runs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AppConfig {
     pub name: String,
     /// Absolute path to the project root.
@@ -26,26 +27,38 @@ pub struct AppConfig {
     /// Auto-restart Harbor-spawned services that exit unexpectedly (bounded
     /// backoff, gives up after a few tries). Never applies to servers started
     /// outside Harbor. Off by default.
-    #[serde(default, rename = "autoRestart", skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        rename = "autoRestart",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub auto_restart: bool,
+    /// Local approval gate for executing this app's commands. Existing and
+    /// user-imported configs default to trusted for backwards compatibility;
+    /// configs registered by an MCP client are forced to `false` until the
+    /// person approves them in Harbor.
+    #[serde(default = "default_trusted")]
+    pub trusted: bool,
+}
+
+fn default_trusted() -> bool {
+    true
 }
 
 impl AppConfig {
-    /// The service list for a profile, or all services if the profile is unknown
-    /// / unspecified. Falls back to `default` then to every service.
+    /// The service list for an exact named profile. `default` selects every
+    /// service when no explicit default profile exists; unknown names select
+    /// nothing so callers cannot silently launch the wrong stack.
     pub fn services_for_profile(&self, profile: &str) -> Vec<ServiceConfig> {
-        let names = self
-            .profiles
-            .get(profile)
-            .or_else(|| self.profiles.get("default"));
-        match names {
+        match self.profiles.get(profile) {
             Some(names) => self
                 .services
                 .iter()
                 .filter(|s| names.contains(&s.name))
                 .cloned()
                 .collect(),
-            None => self.services.clone(),
+            None if profile == "default" => self.services.clone(),
+            None => Vec::new(),
         }
     }
 
@@ -60,7 +73,7 @@ impl AppConfig {
 }
 
 /// One long-running process within an app.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceConfig {
     pub name: String,
     /// Working directory, relative to the app root (or absolute). Defaults to `.`.
@@ -77,7 +90,11 @@ pub struct ServiceConfig {
     /// Services that must reach `ready` before this one starts.
     #[serde(default, rename = "dependsOn")]
     pub depends_on: Vec<String>,
-    #[serde(default, rename = "healthCheck", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "healthCheck",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub health_check: Option<HealthCheck>,
     /// Regex on stdout/stderr that flips the service to `ready`.
     #[serde(
@@ -93,7 +110,7 @@ fn default_cwd() -> String {
 }
 
 /// How Harbor decides a service is `ready`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum HealthCheck {
     /// HTTP GET `path` on the service's port; ready on a 2xx/3xx response.
@@ -266,4 +283,75 @@ pub struct ServiceStat {
     pub cpu: f32,
     #[serde(rename = "memBytes")]
     pub mem_bytes: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Machine-wide local-server discovery (UI + MCP facing)
+// ---------------------------------------------------------------------------
+
+/// One TCP listener observed on the local machine. Discovery is deliberately
+/// separate from ownership: an entry can be matched to a Harbor app without
+/// Harbor having permission to stop it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalServer {
+    /// PID that owns the listening socket (often a child of npm/vite).
+    pub pid: u32,
+    /// Process-group leader used for stable identity and safe cleanup checks.
+    pub leader_pid: u32,
+    pub port: u16,
+    pub addresses: Vec<String>,
+    /// True when at least one socket is bound beyond loopback (for example `*`
+    /// or a LAN address). This is a visibility warning, not a firewall verdict.
+    pub network_exposed: bool,
+    pub process: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Nearest ancestor containing a project marker such as package.json/.git.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
+    pub display_name: String,
+    /// Best-effort technology label derived from argv and the HTTP response.
+    pub kind: String,
+    /// `ps lstart` token for the group leader. Together with `leaderPid`, this
+    /// prevents a stale cleanup action from hitting a reused PID.
+    pub started_at: String,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_header: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_app: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_reason: Option<String>,
+    /// True when this exact process is already represented in Supervisor state.
+    pub tracked: bool,
+    /// True when the tracked process was started outside Harbor.
+    pub external: bool,
+    /// Cleanup is offered only for isolated, untracked process groups whose
+    /// identity can be revalidated immediately before signalling.
+    pub safe_to_stop: bool,
+    pub likely_dev: bool,
+    /// Number of distinct process groups with the same project + runtime
+    /// fingerprint. Values >1 are probable duplicate dev-server launches.
+    pub duplicate_count: usize,
+    /// Harbor's own MCP listener: visible for clarity, never cleanable here.
+    pub harbor_internal: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalServerInventory {
+    pub scanned_at: u64,
+    pub servers: Vec<LocalServer>,
+    pub dev_count: usize,
+    pub other_count: usize,
+    pub mapped_count: usize,
+    pub duplicate_count: usize,
 }

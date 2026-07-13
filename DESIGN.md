@@ -4,8 +4,9 @@
 > button, manages ports intelligently, and exposes an **MCP server** so any
 > user's Claude can discover, configure, and drive it — without editing source.
 
-Status: **design draft** (written in the QuizletLocal session). Build happens in
-a fresh session. Stack decision: **Tauri 2** (Rust core + web UI).
+Status: **implemented architecture reference**. The original milestone notes are
+kept for design context; current product priorities live in [`ROADMAP.md`](./ROADMAP.md).
+Stack: **Tauri 2** (Rust core + web UI).
 
 ---
 
@@ -89,12 +90,12 @@ The orchestrator is table stakes; the **Claude-drivable MCP surface** is the pro
   version + that it supports the streamable-HTTP server transport at build time
   (fall back to SSE if needed).
 - **Bind:** `127.0.0.1` only, on a stable port (configurable; default e.g. 7777,
-  auto-bump if taken). Require a per-install **bearer token**.
-- **Registration UX:** Settings screen shows a one-click "Connect your Claude"
-  that copies/writes the exact `claude mcp add --transport http harbor
-  http://127.0.0.1:<port> --header "Authorization: Bearer <token>"` command (and
-  the JSON snippet for Claude Desktop). This is the "others download it and their
-  Claude does the same" path.
+  auto-bump if taken). Require a per-launch **bearer token**.
+- **Registration UX:** Settings provides one-click Claude Code, Claude Desktop,
+  and Codex setup through an owner-only stdio launcher. The launcher follows the
+  live protected port/token descriptor and opens Harbor after reboot. Advanced
+  users can still copy a native Streamable-HTTP configuration for the current
+  endpoint. This is the "others download it and their agent does the same" path.
 
 ### 3.3 Web UI
 - React (reuse the Radix Themes + framer-motion stack from QuizletLocal for
@@ -165,7 +166,7 @@ Claude can reason and report. Confirm-gate destructive ones at the UI layer.
 
 ## 7. Security model
 
-- MCP bound to `127.0.0.1` + per-install bearer token (rotatable).
+- MCP bound to `127.0.0.1` + automatically rotated per-launch bearer token.
 - Running arbitrary commands is the whole point, but: show every command in the
   UI before first run of a new service; a "trusted apps" notion; never auto-run a
   service config that arrived from outside without a user confirming once.
@@ -184,7 +185,8 @@ config + confidence notes; the user (or their Claude, with confirmation) saves i
   **code signing + notarization** (Apple Developer ID) before sharing widely;
   until then, right-click→Open. Cross-platform later (Tauri supports win/linux;
   process-group/kill code is the main per-OS branch).
-- First-run: pick app data dir, generate MCP token, show "Connect your Claude".
+- First-run: pick app data dir and show "Connect your Claude"; rotate the MCP
+  token on every launch.
 
 ## 10. MVP (vertical slice to build first)
 
