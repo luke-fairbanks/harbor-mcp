@@ -1,4 +1,6 @@
-<svg width="600" height="400" viewBox="0 0 600 400" xmlns="http://www.w3.org/2000/svg">
+<!-- Render at 1200x800 and tag the PNG as 144 DPI. Finder displays the DMG
+     window at 600x400 points, so this supplies a native @2x Retina image. -->
+<svg width="1200" height="800" viewBox="0 0 600 400" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="400" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#f8fafc"/>

@@ -1,6 +1,6 @@
 [package]
 name = "harbor"
-version = "0.2.0"
+version = "0.2.1"
 description = "A trusted local development server control plane for people and AI agents"
 authors = ["Luke Fairbanks"]
 edition = "2021"

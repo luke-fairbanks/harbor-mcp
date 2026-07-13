@@ -2,7 +2,7 @@ name: Release
 
 # Cut a release by pushing a version tag that matches the version in
 # src-tauri/tauri.conf.json, e.g.:
-#   git tag v0.2.0 && git push origin v0.2.0
+#   git tag v0.2.1 && git push origin v0.2.1
 # Builds a UNIVERSAL (Intel + Apple Silicon) .dmg and attaches it to a draft
 # GitHub Release. If the Apple signing secrets are configured (see
 # DISTRIBUTING.md) the build is code-signed + notarized; otherwise it ships
@@ -56,6 +56,18 @@ jobs:
 
       - name: Verify frontend
         run: npm run build
+
+      - name: Verify Retina DMG background
+        run: |
+          image="src-tauri/dmg-background.png"
+          width=$(sips -g pixelWidth "$image" | awk '/pixelWidth/ {print $2}')
+          height=$(sips -g pixelHeight "$image" | awk '/pixelHeight/ {print $2}')
+          dpi_width=$(sips -g dpiWidth "$image" | awk '/dpiWidth/ {print $2}')
+          dpi_height=$(sips -g dpiHeight "$image" | awk '/dpiHeight/ {print $2}')
+          test "$width" = 1200
+          test "$height" = 800
+          test "$dpi_width" = 144.000
+          test "$dpi_height" = 144.000
 
       - name: Verify Rust formatting
         working-directory: src-tauri

@@ -61,8 +61,8 @@ APPLE_CERTIFICATE   APPLE_CERTIFICATE_PASSWORD   KEYCHAIN_PASSWORD
 Keep the tag in sync with `version` in `src-tauri/tauri.conf.json`, then push it:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 The workflow builds a universal `.dmg`, signs + notarizes it, and creates a
