@@ -14,26 +14,31 @@ import type { AgentStatus, McpInfo } from "../types";
 type AgentKind = "code" | "desktop" | "codex";
 
 function CopyButton({ text, label }: { text: string; label: string }) {
-  const [done, setDone] = useState(false);
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const copied = state === "copied";
+  const failed = state === "failed";
 
   return (
     <Button
       className="connections-copy-button"
       size="1"
       variant="soft"
-      aria-label={done ? `${label} copied` : label}
+      color={failed ? "red" : undefined}
+      aria-label={
+        copied ? `${label} copied` : failed ? `${label} failed` : label
+      }
       onClick={async () => {
         try {
           await navigator.clipboard.writeText(text);
+          setState("copied");
         } catch {
-          /* webview may block */
+          setState("failed");
         }
-        setDone(true);
-        setTimeout(() => setDone(false), 1200);
+        window.setTimeout(() => setState("idle"), 1600);
       }}
     >
-      {done ? <CheckIcon /> : <CopyIcon />}
-      <span>{done ? "Copied" : label}</span>
+      {copied ? <CheckIcon /> : failed ? <InfoCircledIcon /> : <CopyIcon />}
+      <span>{copied ? "Copied" : failed ? "Copy failed" : label}</span>
     </Button>
   );
 }

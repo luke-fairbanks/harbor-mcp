@@ -29,7 +29,7 @@
   --sidebar-bg: #071b24;
   --sidebar-text: #edf8fa;
   --sidebar-text-2: rgba(224, 244, 247, 0.66);
-  --sidebar-text-3: rgba(211, 237, 241, 0.42);
+  --sidebar-text-3: rgba(211, 237, 241, 0.58);
   --sidebar-hover: rgba(161, 226, 236, 0.07);
   --sidebar-selected: rgba(64, 185, 213, 0.14);
   --sidebar-border: rgba(169, 224, 233, 0.1);
@@ -42,7 +42,7 @@
   --inset: #edf3f4;
   --text: #10212a;
   --text-2: #52636b;
-  --text-3: #829198;
+  --text-3: #63737a;
   --hair: rgba(10, 38, 50, 0.09);
   --hair-2: rgba(10, 38, 50, 0.16);
   --shadow-card:
@@ -50,19 +50,19 @@
   --shadow-float: 0 18px 60px rgba(3, 18, 25, 0.2);
   --card-shadow: var(--shadow-card);
 
-  --accent: #1689e8;
+  --accent: #0969b0;
   --accent-2: #18b4c6;
   --accent-fg: #ffffff;
   --accent-soft: rgba(22, 137, 232, 0.11);
-  --ok: #279c6b;
+  --ok: #147a50;
   --ok-soft: rgba(39, 156, 107, 0.12);
-  --warn: #cf841d;
+  --warn: #9a5a00;
   --warn-soft: rgba(207, 132, 29, 0.13);
-  --danger: #da5158;
+  --danger: #bf3f48;
   --danger-soft: rgba(218, 81, 88, 0.11);
-  --run: #1689e8;
-  --run-hover: #117ad1;
-  --stop: #d95359;
+  --run: #0969b0;
+  --run-hover: #075b99;
+  --stop: #bf3f48;
   --stop-hover: #c7464c;
   --focus-ring: rgba(22, 137, 232, 0.48);
 
@@ -246,6 +246,7 @@ button {
     transparent 1px
   );
   background-size: 100% 36px;
+  -webkit-mask-image: linear-gradient(to bottom, black, transparent 72%);
   mask-image: linear-gradient(to bottom, black, transparent 72%);
 }
 
@@ -981,6 +982,7 @@ button {
   border-radius: var(--r-window);
   color: var(--accent);
   background: rgba(237, 248, 250, 0.94);
+  -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
   font-size: 14px;
   font-weight: 680;
@@ -1150,6 +1152,7 @@ button {
   border-radius: 14px;
   color: rgba(228, 244, 247, 0.7);
   background: rgba(4, 20, 27, 0.32);
+  -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   text-align: left;
 }
@@ -2722,6 +2725,14 @@ button.server-port:hover {
   display: block;
   margin-bottom: 8px;
 }
+.config-field-group {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+}
+.config-field-group > .config-label {
+  padding: 0;
+}
 .config-label {
   margin-bottom: 4px;
   color: var(--text-3);
@@ -2783,9 +2794,14 @@ button.server-port:hover {
   font-size: 11.5px !important;
 }
 .rt-SelectItem[data-highlighted],
-.rt-DropdownMenuItem[data-highlighted] {
+.rt-DropdownMenuItem:not([data-accent-color="red"])[data-highlighted] {
   color: var(--accent) !important;
   background: var(--accent-soft) !important;
+  outline: 0 !important;
+}
+.rt-DropdownMenuItem[data-accent-color="red"][data-highlighted] {
+  color: var(--danger) !important;
+  background: var(--danger-soft) !important;
   outline: 0 !important;
 }
 .rt-SelectTrigger {

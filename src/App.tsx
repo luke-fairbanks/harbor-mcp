@@ -213,11 +213,10 @@ export default function App() {
 
   const selectedItem = items.find((i) => i.config.name === selected) ?? null;
 
-  const claudeOn = !!(agents?.codeConnected || agents?.desktopConnected);
-  const codexOn = !!agents?.codexConnected;
   const connectedNames = [
-    claudeOn ? "Claude" : null,
-    codexOn ? "Codex" : null,
+    agents?.codeConnected ? "Claude Code" : null,
+    agents?.desktopConnected ? "Claude Desktop" : null,
+    agents?.codexConnected ? "Codex" : null,
   ].filter(Boolean) as string[];
   const agentsConnected = connectedNames.length > 0;
   const bridgeLabel = agentsConnected

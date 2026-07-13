@@ -184,7 +184,7 @@ export function AppDetail({
         <div className="app-title-cluster">
           <div className="page-eyebrow">
             <span>Project</span>
-            <StatusBadge status={projectStatus} />
+            <StatusBadge status={projectStatus} context="Project" />
           </div>
           <div className="app-title-row">
             <ProjectGlyph name={cfg.name} />

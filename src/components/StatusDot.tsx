@@ -36,7 +36,13 @@ export function StatusDot({ status }: { status: ServiceStatus }) {
   );
 }
 
-export function StatusBadge({ status }: { status: ServiceStatus }) {
+export function StatusBadge({
+  status,
+  context = "Service",
+}: {
+  status: ServiceStatus;
+  context?: "Project" | "Service";
+}) {
   const tone = STATUS_TONE[status];
   const color = STATUS_COLOR[status];
   const label = STATUS_LABEL[status];
@@ -44,7 +50,7 @@ export function StatusBadge({ status }: { status: ServiceStatus }) {
     <span
       className="badge"
       data-tone={tone}
-      aria-label={`Service status: ${label}`}
+      aria-label={`${context} status: ${label}`}
       style={{
         background: `color-mix(in srgb, ${color} 16%, transparent)`,
         color,

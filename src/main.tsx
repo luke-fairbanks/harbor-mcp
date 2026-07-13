@@ -39,11 +39,7 @@ class AppErrorBoundary extends React.Component<
 }
 
 // The same bundle renders the main app or the menu-bar panel, by window label.
-const isTauriRuntime = Boolean(
-  (window as typeof window & { __TAURI_INTERNALS__?: { metadata?: unknown } })
-    .__TAURI_INTERNALS__?.metadata,
-);
-const isTray = isTauriRuntime && getCurrentWindow().label === "tray";
+const isTray = getCurrentWindow().label === "tray";
 
 function Root() {
   const appearance = useAppearance();

@@ -195,6 +195,7 @@ export function ConfigEditor({
                     value={s.name}
                     onChange={(e) => patchService(i, { name: e.target.value })}
                     placeholder="service name"
+                    aria-label={`Service ${i + 1} name`}
                   />
                   <IconButton
                     size="1"
@@ -289,7 +290,7 @@ export function ConfigEditor({
                   )}
                 </Grid2>
 
-                <Labeled label="Environment (supports ${PORT}, ${services.X.port})">
+                <FieldGroup label="Environment (supports ${PORT}, ${services.X.port})">
                   <Flex direction="column" gap="1">
                     {Object.entries(s.env).map(([k, v], r) => (
                       <Flex gap="2" key={r} align="center">
@@ -301,6 +302,7 @@ export function ConfigEditor({
                           }}
                           value={k}
                           placeholder="KEY"
+                          aria-label={`Environment variable ${r + 1} name for ${s.name}`}
                           onChange={(e) => {
                             const entries = Object.entries(s.env);
                             entries[r] = [e.target.value, v];
@@ -313,6 +315,7 @@ export function ConfigEditor({
                           style={{ flex: 1, fontFamily: "var(--font-mono)" }}
                           value={v}
                           placeholder="value"
+                          aria-label={`Environment variable ${r + 1} value for ${s.name}`}
                           onChange={(e) => {
                             const entries = Object.entries(s.env);
                             entries[r] = [k, e.target.value];
@@ -329,6 +332,7 @@ export function ConfigEditor({
                               Object.entries(s.env).filter((_, j) => j !== r),
                             )
                           }
+                          aria-label={`Remove environment variable ${k || r + 1} from ${s.name}`}
                         >
                           <TrashIcon />
                         </IconButton>
@@ -357,10 +361,10 @@ export function ConfigEditor({
                       Stored as plaintext. Env changes apply on next Start.
                     </Text>
                   </Flex>
-                </Labeled>
+                </FieldGroup>
 
                 {otherNames(s.name).length > 0 && (
-                  <Labeled label="Depends on">
+                  <FieldGroup label="Depends on">
                     <Flex gap="3" wrap="wrap" pt="1">
                       {otherNames(s.name).map((n) => (
                         <Text as="label" size="1" key={n} className="row">
@@ -378,7 +382,7 @@ export function ConfigEditor({
                         </Text>
                       ))}
                     </Flex>
-                  </Labeled>
+                  </FieldGroup>
                 )}
               </div>
             ))}
@@ -402,6 +406,7 @@ export function ConfigEditor({
                     style={{ width: 180 }}
                     defaultValue={p}
                     onBlur={(e) => renameProfile(p, e.target.value.trim())}
+                    aria-label={`Profile name: ${p}`}
                   />
                   <span className="spacer" />
                   <IconButton
@@ -461,5 +466,20 @@ function Labeled({ label, children }: { label: string; children: ReactNode }) {
       <div className="config-label">{label}</div>
       {children}
     </label>
+  );
+}
+
+function FieldGroup({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <fieldset className="config-labeled config-field-group">
+      <legend className="config-label">{label}</legend>
+      {children}
+    </fieldset>
   );
 }
