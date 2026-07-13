@@ -20,3 +20,48 @@ export function AnchorMark({ size = 17 }: { size?: number }) {
     </svg>
   );
 }
+
+export function ProjectGlyph({
+  name,
+  compact = false,
+}: {
+  name: string;
+  compact?: boolean;
+}) {
+  const initials =
+    name
+      .split(/[\s_-]+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase())
+      .join("") || "P";
+  const variant =
+    [...name].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 5;
+
+  return (
+    <span
+      className="project-glyph"
+      data-variant={variant}
+      data-compact={compact || undefined}
+      aria-hidden
+    >
+      {initials}
+    </span>
+  );
+}
+
+export function HarborBeacon({ size = 96 }: { size?: number }) {
+  return (
+    <span
+      className="harbor-beacon"
+      style={{ width: size, height: size }}
+      aria-hidden
+    >
+      <span className="harbor-beacon-ring" />
+      <span className="harbor-beacon-ring" />
+      <span className="harbor-beacon-core">
+        <AnchorMark size={Math.round(size * 0.28)} />
+      </span>
+    </span>
+  );
+}

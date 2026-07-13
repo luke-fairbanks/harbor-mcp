@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DropdownMenu, Tooltip } from "@radix-ui/themes";
 import {
   CheckCircledIcon,
+  DashboardIcon,
   DotsHorizontalIcon,
-  GearIcon,
   GlobeIcon,
+  Link2Icon,
   PlusIcon,
 } from "@radix-ui/react-icons";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { api, onLog, onRegistry, onSelect, onStats, onStatus } from "./api";
 import type {
   AgentStatus,
@@ -20,9 +21,10 @@ import { StatusDot, aggregateStatus } from "./components/StatusDot";
 import { AppDetail } from "./components/AppDetail";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { LocalServersPanel } from "./components/LocalServersPanel";
+import { OverviewPanel } from "./components/OverviewPanel";
 import { RegisterDialog } from "./components/RegisterDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
-import { AnchorMark } from "./components/icons";
+import { AnchorMark, ProjectGlyph } from "./components/icons";
 import { useFolderDrop } from "./useDragDrop";
 import { startWindowDrag } from "./titlebar";
 
@@ -33,7 +35,9 @@ export default function App() {
   const [live, setLive] = useState<Record<string, AppRunSnapshot>>({});
   const [logs, setLogs] = useState<Record<string, LogLine[]>>({});
   const [selected, setSelected] = useState<string | null>(null);
-  const [view, setView] = useState<"app" | "servers" | "settings">("app");
+  const [view, setView] = useState<"overview" | "app" | "servers" | "settings">(
+    "overview",
+  );
   const [registerOpen, setRegisterOpen] = useState(false);
   const [agents, setAgents] = useState<AgentStatus | null>(null);
   const [confirmStopAll, setConfirmStopAll] = useState(false);
@@ -216,9 +220,9 @@ export default function App() {
     codexOn ? "Codex" : null,
   ].filter(Boolean) as string[];
   const agentsConnected = connectedNames.length > 0;
-  const footLabel = agentsConnected
-    ? `Connected to ${connectedNames.join(" & ")}`
-    : "Connect an AI agent";
+  const bridgeLabel = agentsConnected
+    ? `${connectedNames.length} connected`
+    : "Not connected";
 
   const runningCount = items.filter(
     (item) => live[item.config.name]?.running ?? item.running,
@@ -271,158 +275,243 @@ export default function App() {
       <aside className="harbor-sidebar">
         <div className="sidebar-head" onMouseDown={startWindowDrag}>
           <span className="sidebar-brand">
-            <span style={{ color: "var(--accent)", display: "inline-flex" }}>
+            <span className="sidebar-brand-mark">
               <AnchorMark size={17} />
             </span>
-            Harbor
+            <span className="sidebar-brand-copy">
+              <strong>Harbor</strong>
+              <small>Local control deck</small>
+            </span>
           </span>
-          <span className="row" style={{ gap: 2, flex: "none" }}>
-            <Tooltip content="Register an app">
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger>
               <button
-                className="icon-btn"
-                onClick={() => setRegisterOpen(true)}
+                className="sidebar-icon-btn"
+                aria-label="Harbor actions"
+                data-no-drag
               >
-                <PlusIcon />
+                <DotsHorizontalIcon />
               </button>
-            </Tooltip>
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger>
-                <button className="icon-btn" aria-label="More actions">
-                  <DotsHorizontalIcon />
-                </button>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Content size="1">
-                <DropdownMenu.Item
-                  disabled={startableCount === 0}
-                  onSelect={doStartAll}
-                >
-                  Start approved apps
-                </DropdownMenu.Item>
-                <DropdownMenu.Item
-                  color="red"
-                  disabled={runningCount === 0}
-                  onSelect={() => setConfirmStopAll(true)}
-                >
-                  Stop all
-                </DropdownMenu.Item>
-              </DropdownMenu.Content>
-            </DropdownMenu.Root>
-          </span>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Content size="1">
+              <DropdownMenu.Item
+                disabled={startableCount === 0}
+                onSelect={doStartAll}
+              >
+                Start approved projects
+              </DropdownMenu.Item>
+              <DropdownMenu.Item
+                color="red"
+                disabled={runningCount === 0}
+                onSelect={() => setConfirmStopAll(true)}
+              >
+                Stop all running projects
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Root>
         </div>
 
-        <div className="sidebar-section">Apps</div>
-        <div className="applist">
-          {items.length === 0 && (
-            <div
-              className="app-meta"
-              style={{ padding: "6px 10px", lineHeight: 1.5 }}
+        <div
+          className="sidebar-running"
+          aria-label={`${runningCount} projects running`}
+        >
+          <span
+            className="sidebar-running-pulse"
+            data-active={runningCount > 0 || undefined}
+          />
+          <span>
+            {runningCount > 0 ? `${runningCount} running` : "All quiet"}
+          </span>
+          <span className="sidebar-running-total">{items.length} projects</span>
+        </div>
+
+        <nav className="sidebar-nav" aria-label="Harbor navigation">
+          <button
+            className="sidebar-nav-item"
+            data-active={view === "overview"}
+            aria-current={view === "overview" ? "page" : undefined}
+            onClick={() => setView("overview")}
+          >
+            <DashboardIcon />
+            <span>Overview</span>
+          </button>
+          <button
+            className="sidebar-nav-item"
+            data-active={view === "servers"}
+            aria-current={view === "servers" ? "page" : undefined}
+            onClick={() => setView("servers")}
+          >
+            <GlobeIcon />
+            <span>Local servers</span>
+          </button>
+          <button
+            className="sidebar-nav-item"
+            data-active={view === "settings"}
+            aria-current={view === "settings" ? "page" : undefined}
+            onClick={() => setView("settings")}
+          >
+            <Link2Icon />
+            <span>AI connections</span>
+            {agentsConnected && (
+              <span className="sidebar-nav-badge">{connectedNames.length}</span>
+            )}
+          </button>
+        </nav>
+
+        <div className="sidebar-section-heading">
+          <span>Projects</span>
+          <Tooltip content="Add a project">
+            <button
+              className="sidebar-add-btn"
+              aria-label="Add a project"
+              onClick={() => setRegisterOpen(true)}
             >
-              No apps yet. Click + to register a project folder.
-            </div>
+              <PlusIcon />
+            </button>
+          </Tooltip>
+        </div>
+
+        <nav className="applist" aria-label="Projects">
+          {items.length === 0 && (
+            <button
+              className="sidebar-empty-projects"
+              onClick={() => setRegisterOpen(true)}
+            >
+              <PlusIcon />
+              <span>
+                <strong>Add your first project</strong>
+                <small>Harbor will detect its services.</small>
+              </span>
+            </button>
           )}
           {items.map((it) => {
             const name = it.config.name;
             const status = aggregateStatus(live[name]);
             const isSel = view === "app" && selected === name;
+            const statusLabel =
+              it.config.trusted === false
+                ? "Review required"
+                : status === "stopped"
+                  ? "Idle"
+                  : status;
             return (
-              <div
+              <button
                 key={name}
                 className="app-item"
+                data-active={isSel || undefined}
+                aria-current={isSel ? "page" : undefined}
+                aria-label={`${name}, ${statusLabel}`}
                 onClick={() => {
                   setSelected(name);
                   setView("app");
                 }}
               >
                 {isSel && (
-                  <motion.div
+                  <motion.span
                     layoutId="app-sel"
                     className="app-sel"
-                    transition={{ type: "spring", stiffness: 520, damping: 42 }}
+                    transition={{ type: "spring", stiffness: 420, damping: 38 }}
                   />
                 )}
-                <StatusDot status={status} />
-                <span className="app-name">{name}</span>
-                {it.config.trusted === false ? (
-                  <span className="app-meta" style={{ color: "var(--warn)" }}>
-                    review
+                <ProjectGlyph name={name} compact />
+                <span className="app-item-copy">
+                  <span className="app-name">{name}</span>
+                  <span
+                    className="app-meta"
+                    data-attention={it.config.trusted === false || undefined}
+                  >
+                    {statusLabel}
                   </span>
-                ) : (
-                  status !== "stopped" && (
-                    <span className="app-meta">{status}</span>
-                  )
-                )}
-              </div>
+                </span>
+                <StatusDot status={status} />
+              </button>
             );
           })}
-        </div>
-
-        <div className="sidebar-section">Machine</div>
-        <div className="sidebar-machine">
-          <button
-            className="foot-btn"
-            data-active={view === "servers"}
-            onClick={() => setView("servers")}
-          >
-            <GlobeIcon /> Local servers
-          </button>
-        </div>
+        </nav>
 
         <div className="sidebar-foot">
           <button
-            className="foot-btn"
-            data-active={view === "settings"}
-            data-connected={agentsConnected}
+            className="sidebar-bridge-status"
+            data-connected={agentsConnected || undefined}
             onClick={() => setView("settings")}
+            aria-label={`AI connections: ${bridgeLabel}`}
           >
-            {agentsConnected ? <CheckCircledIcon /> : <GearIcon />} {footLabel}
+            <span className="bridge-status-icon">
+              {agentsConnected ? <CheckCircledIcon /> : <Link2Icon />}
+            </span>
+            <span>
+              <strong>Harbor Bridge</strong>
+              <small>{bridgeLabel}</small>
+            </span>
           </button>
         </div>
       </aside>
 
       <main className="harbor-detail">
-        {view === "settings" ? (
-          <SettingsPanel onAgentsChanged={refreshAgents} />
-        ) : view === "servers" ? (
-          <LocalServersPanel
-            onOpenApp={(name) => {
-              setSelected(name);
-              setView("app");
-            }}
-            onRegisterPath={registerDetectedPath}
-          />
-        ) : selectedItem ? (
-          <AppDetail
-            key={selectedItem.config.name}
-            item={selectedItem}
-            run={live[selectedItem.config.name]}
-            logs={logs[selectedItem.config.name] ?? []}
-            onChanged={() => {
-              refreshApp(selectedItem.config.name);
-              refreshList();
-            }}
-            onRemoved={() => {
-              setSelected(null);
-              refreshList();
-            }}
-          />
-        ) : (
-          <div className="empty-state">
-            <AnchorMark size={26} />
-            <div className="empty-title">Bring a local project into Harbor</div>
-            <div className="empty-copy">
-              Drop its folder anywhere, or let Harbor scan it and propose the
-              right services, commands, and ports.
-            </div>
-            <div className="row" style={{ marginTop: 4 }}>
-              <button className="run-btn" onClick={() => setRegisterOpen(true)}>
-                <PlusIcon /> Add a project
-              </button>
-              <button className="fix-btn" onClick={() => setView("servers")}>
-                <GlobeIcon /> See what is already running
-              </button>
-            </div>
-          </div>
-        )}
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.section
+            className="view-frame"
+            key={view === "app" ? `app:${selected ?? "none"}` : view}
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -2 }}
+            transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
+          >
+            {view === "overview" ? (
+              <OverviewPanel
+                items={items}
+                live={live}
+                agents={agents}
+                onOpenApp={(name) => {
+                  setSelected(name);
+                  setView("app");
+                }}
+                onAddProject={() => setRegisterOpen(true)}
+                onOpenServers={() => setView("servers")}
+                onOpenConnections={() => setView("settings")}
+              />
+            ) : view === "settings" ? (
+              <SettingsPanel onAgentsChanged={refreshAgents} />
+            ) : view === "servers" ? (
+              <LocalServersPanel
+                onOpenApp={(name) => {
+                  setSelected(name);
+                  setView("app");
+                }}
+                onRegisterPath={registerDetectedPath}
+              />
+            ) : selectedItem ? (
+              <AppDetail
+                key={selectedItem.config.name}
+                item={selectedItem}
+                run={live[selectedItem.config.name]}
+                logs={logs[selectedItem.config.name] ?? []}
+                onChanged={() => {
+                  refreshApp(selectedItem.config.name);
+                  refreshList();
+                }}
+                onRemoved={() => {
+                  setSelected(null);
+                  setView("overview");
+                  refreshList();
+                }}
+              />
+            ) : (
+              <OverviewPanel
+                items={items}
+                live={live}
+                agents={agents}
+                onOpenApp={(name) => {
+                  setSelected(name);
+                  setView("app");
+                }}
+                onAddProject={() => setRegisterOpen(true)}
+                onOpenServers={() => setView("servers")}
+                onOpenConnections={() => setView("settings")}
+              />
+            )}
+          </motion.section>
+        </AnimatePresence>
       </main>
 
       <RegisterDialog

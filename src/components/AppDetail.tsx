@@ -3,6 +3,7 @@ import {
   Button,
   Code,
   Dialog,
+  DropdownMenu,
   Flex,
   Select,
   Spinner,
@@ -11,6 +12,7 @@ import {
 } from "@radix-ui/themes";
 import {
   CopyIcon,
+  DotsHorizontalIcon,
   ExternalLinkIcon,
   MagicWandIcon,
   Pencil1Icon,
@@ -28,11 +30,12 @@ import type {
   ServiceRun,
 } from "../types";
 import { api, formatBytes } from "../api";
-import { StatusBadge, StatusDot } from "./StatusDot";
+import { aggregateStatus, StatusBadge, StatusDot } from "./StatusDot";
 import { LogPane } from "./LogPane";
 import { ConfigEditor } from "./ConfigEditor";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { startWindowDrag } from "../titlebar";
+import { ProjectGlyph } from "./icons";
 
 export function AppDetail({
   item,
@@ -81,6 +84,15 @@ export function AppDetail({
   const activeServices = (
     running ? run!.services.map((s) => s.name) : profileServices
   ).filter((n, i, a) => a.indexOf(n) === i);
+  const projectStatus = aggregateStatus(run);
+  const readyCount =
+    run?.services.filter((service) => service.status === "ready").length ?? 0;
+  const serviceCount = running
+    ? (run?.services.length ?? 0)
+    : activeServices.length;
+  const healthSummary = running
+    ? `${readyCount} of ${serviceCount} services ready`
+    : `${serviceCount} service${serviceCount === 1 ? "" : "s"} configured`;
 
   async function act(
     kind: "start" | "stop" | "restart",
@@ -165,36 +177,55 @@ export function AppDetail({
 
   return (
     <>
-      <div className="detail-head" onMouseDown={startWindowDrag}>
-        <div style={{ minWidth: 0 }}>
-          <div className="detail-title">{cfg.name}</div>
-          <div className="detail-sub" data-no-drag>
-            {cfg.root}
+      <div
+        className="detail-head app-detail-head"
+        onMouseDown={startWindowDrag}
+      >
+        <div className="app-title-cluster">
+          <div className="page-eyebrow">
+            <span>Project</span>
+            <StatusBadge status={projectStatus} />
           </div>
-          <label className="auto-restart-toggle" data-no-drag>
-            <Switch
-              size="1"
-              checked={cfg.autoRestart ?? false}
-              onCheckedChange={toggleAutoRestart}
-              disabled={busy !== null}
-            />
-            <Tooltip content="If a service Harbor started exits unexpectedly, Harbor restarts it (up to 5 times, with backoff). Never affects servers started outside Harbor.">
-              <span>Auto-restart on crash</span>
-            </Tooltip>
-          </label>
+          <div className="app-title-row">
+            <ProjectGlyph name={cfg.name} />
+            <div className="app-title-copy">
+              <h1 className="detail-title">{cfg.name}</h1>
+              <div className="project-health-summary">{healthSummary}</div>
+            </div>
+          </div>
+          <div className="project-context" data-no-drag>
+            <span className="detail-sub" title={cfg.root}>
+              {cfg.root}
+            </span>
+            <label className="auto-restart-toggle">
+              <Switch
+                size="1"
+                checked={cfg.autoRestart ?? false}
+                onCheckedChange={toggleAutoRestart}
+                disabled={busy !== null}
+              />
+              <Tooltip content="If a service Harbor started exits unexpectedly, Harbor restarts it with backoff. It never affects servers started outside Harbor.">
+                <span>Auto-restart</span>
+              </Tooltip>
+            </label>
+          </div>
         </div>
-        <div className="row" style={{ flex: "none" }}>
+
+        <div className="app-header-actions" data-no-drag>
           {!running && profiles.length > 1 && (
-            <Select.Root value={profile} onValueChange={setProfile} size="2">
-              <Select.Trigger variant="surface" />
-              <Select.Content>
-                {profiles.map((p) => (
-                  <Select.Item key={p} value={p}>
-                    {p}
-                  </Select.Item>
-                ))}
-              </Select.Content>
-            </Select.Root>
+            <label className="profile-control">
+              <span>Profile</span>
+              <Select.Root value={profile} onValueChange={setProfile} size="2">
+                <Select.Trigger variant="surface" />
+                <Select.Content>
+                  {profiles.map((p) => (
+                    <Select.Item key={p} value={p}>
+                      {p}
+                    </Select.Item>
+                  ))}
+                </Select.Content>
+              </Select.Root>
+            </label>
           )}
 
           <AnimatePresence mode="wait" initial={false}>
@@ -212,7 +243,7 @@ export function AppDetail({
                   disabled={busy !== null}
                   onClick={() => setConfirmStop(true)}
                 >
-                  <StopIcon /> {busy === "stop" ? "Stopping…" : "Stop"}
+                  <StopIcon /> {busy === "stop" ? "Stopping…" : "Stop project"}
                 </button>
               </motion.div>
             ) : (
@@ -230,53 +261,68 @@ export function AppDetail({
                     act("start", () => api.startApp(cfg.name, profile))
                   }
                 >
-                  <PlayIcon /> {busy === "start" ? "Starting…" : "Start"}
+                  <PlayIcon />{" "}
+                  {busy === "start" ? "Starting…" : "Start project"}
                 </button>
               </motion.div>
             )}
           </AnimatePresence>
 
-          <Tooltip content="Restart">
-            <button
-              className="icon-btn"
-              disabled={!running || busy !== null}
-              onClick={() => act("restart", () => api.restartApp(cfg.name))}
-            >
-              <ReloadIcon className={busy === "restart" ? "spin" : undefined} />
-            </button>
-          </Tooltip>
-          <Tooltip content="Open in browser">
-            <button
-              className="icon-btn"
-              disabled={!running}
-              onClick={() => api.openApp(cfg.name)}
-            >
-              <ExternalLinkIcon />
-            </button>
-          </Tooltip>
-          <Tooltip content="Edit config">
-            <button
-              className="icon-btn"
-              disabled={running}
-              onClick={() => setEditing(true)}
-            >
-              <Pencil1Icon />
-            </button>
-          </Tooltip>
-          <Tooltip content="Export harbor.json">
-            <button className="icon-btn" onClick={doExport}>
-              <Share1Icon />
-            </button>
-          </Tooltip>
-          <Tooltip content={running ? "Stop before removing" : "Remove app"}>
-            <button
-              className="icon-btn"
-              disabled={running}
-              onClick={() => setConfirmRemove(true)}
-            >
-              <TrashIcon />
-            </button>
-          </Tooltip>
+          {running && (
+            <>
+              <Tooltip content="Restart project">
+                <button
+                  className="icon-btn"
+                  aria-label={`Restart ${cfg.name}`}
+                  disabled={busy !== null}
+                  onClick={() => act("restart", () => api.restartApp(cfg.name))}
+                >
+                  <ReloadIcon
+                    className={busy === "restart" ? "spin" : undefined}
+                  />
+                </button>
+              </Tooltip>
+              <Tooltip content="Open in browser">
+                <button
+                  className="icon-btn"
+                  aria-label={`Open ${cfg.name} in a browser`}
+                  onClick={() => api.openApp(cfg.name)}
+                >
+                  <ExternalLinkIcon />
+                </button>
+              </Tooltip>
+            </>
+          )}
+
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger>
+              <button
+                className="icon-btn"
+                aria-label={`More actions for ${cfg.name}`}
+              >
+                <DotsHorizontalIcon />
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Content align="end" size="1">
+              <DropdownMenu.Item
+                disabled={running}
+                onSelect={() => setEditing(true)}
+              >
+                <Pencil1Icon /> Edit configuration
+              </DropdownMenu.Item>
+              <DropdownMenu.Item onSelect={doExport}>
+                <Share1Icon /> Export harbor.json
+              </DropdownMenu.Item>
+              <DropdownMenu.Separator />
+              <DropdownMenu.Item
+                color="red"
+                disabled={running}
+                onSelect={() => setConfirmRemove(true)}
+              >
+                <TrashIcon /> Remove project
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Root>
         </div>
       </div>
 
@@ -306,18 +352,16 @@ export function AppDetail({
         )}
         {(error || note) && (
           <div
-            className="mono"
-            style={{
-              fontSize: 12,
-              color: error ? "var(--danger)" : "var(--text-2)",
-            }}
+            className="async-notice mono"
+            data-tone={error ? "danger" : "neutral"}
+            role={error ? "alert" : "status"}
           >
             {error ?? note}
           </div>
         )}
 
         {run && run.portPlan.length > 0 && (
-          <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+          <div className="port-plan">
             <span className="section-label">Port plan</span>
             {run.portPlan.map((p) => (
               <span
@@ -351,6 +395,7 @@ export function AppDetail({
                 className="svc-card"
                 key={name}
                 data-errored={errored}
+                data-status={status}
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.18 }}
@@ -360,7 +405,7 @@ export function AppDetail({
                     <StatusDot status={status} />
                     {name}
                   </span>
-                  <span className="row" style={{ gap: 6, flex: "none" }}>
+                  <span className="svc-status-group">
                     {sr?.external ? (
                       <Tooltip content="Started outside Harbor (e.g. from a terminal). Harbor matched this process to the app by its port and project folder. Open and Stop work, but live logs aren't captured — Stop here, then Start to run it under Harbor with logs.">
                         <span className="external-tag">external</span>
@@ -373,24 +418,24 @@ export function AppDetail({
                     <StatusBadge status={status} />
                   </span>
                 </div>
-                <div
-                  className={`svc-cmd ${cfg.trusted === false ? "trust-command" : ""}`}
-                >
-                  {cfg.trusted === false
-                    ? (sc?.command ?? "")
-                    : (sr?.resolvedCommand ?? sc?.command ?? "")}
-                </div>
-                {cfg.trusted === false && sc && (
-                  <div className="trust-command-details mono">
-                    <span>cwd: {sc.cwd || "."}</span>
-                    {sc.port != null && <span>port: {sc.port}</span>}
-                    {Object.entries(sc.env).map(([key, value]) => (
-                      <span key={key}>
-                        {key}={value}
-                      </span>
-                    ))}
-                  </div>
-                )}
+                {cfg.trusted === false ? (
+                  <>
+                    <div className="svc-cmd trust-command">
+                      {sc?.command ?? ""}
+                    </div>
+                    {sc && (
+                      <div className="trust-command-details mono">
+                        <span>cwd: {sc.cwd || "."}</span>
+                        {sc.port != null && <span>port: {sc.port}</span>}
+                        {Object.entries(sc.env).map(([key, value]) => (
+                          <span key={key}>
+                            {key}={value}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                ) : null}
                 <div className="svc-meta">
                   {sr?.port != null &&
                     (status === "ready" ? (
@@ -422,15 +467,28 @@ export function AppDetail({
                         · {formatBytes(sr.memBytes)}
                       </span>
                     )}
-                  {sc?.dependsOn && sc.dependsOn.length > 0 && (
-                    <span>↳ {sc.dependsOn.join(", ")}</span>
-                  )}
                   {sr?.exitCode != null && (
                     <span style={{ color: "var(--danger)" }}>
                       exit {sr.exitCode}
                     </span>
                   )}
                 </div>
+                {cfg.trusted !== false && (
+                  <details className="svc-details">
+                    <summary>Service details</summary>
+                    <div className="svc-details-content">
+                      <div className="svc-cmd">
+                        {sr?.resolvedCommand ?? sc?.command ?? ""}
+                      </div>
+                      <div className="svc-tech-meta mono">
+                        <span>cwd: {sc?.cwd || "."}</span>
+                        {sc?.dependsOn && sc.dependsOn.length > 0 && (
+                          <span>after: {sc.dependsOn.join(", ")}</span>
+                        )}
+                      </div>
+                    </div>
+                  </details>
+                )}
                 {errored && (
                   <>
                     {errLine && <div className="svc-error">{errLine}</div>}
@@ -453,7 +511,7 @@ export function AppDetail({
           })}
         </div>
 
-        <LogPane logs={logs} services={activeServices} />
+        <LogPane logs={logs} services={activeServices} running={running} />
       </div>
 
       {editing && (

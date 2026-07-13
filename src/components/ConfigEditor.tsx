@@ -37,7 +37,9 @@ export function ConfigEditor({
 
   function patchService(i: number, patch: Partial<ServiceConfig>) {
     setDraft((d) => {
-      const services = d.services.map((s, j) => (j === i ? { ...s, ...patch } : s));
+      const services = d.services.map((s, j) =>
+        j === i ? { ...s, ...patch } : s,
+      );
       return { ...d, services };
     });
   }
@@ -68,7 +70,11 @@ export function ConfigEditor({
   function setHealth(i: number, type: HCType, extra?: Partial<HealthCheck>) {
     let hc: HealthCheck | undefined;
     if (type === "http")
-      hc = { type: "http", path: (extra as any)?.path ?? "/", expect: "2xx-3xx" };
+      hc = {
+        type: "http",
+        path: (extra as any)?.path ?? "/",
+        expect: "2xx-3xx",
+      };
     else if (type === "tcp") hc = { type: "tcp" };
     else if (type === "process") hc = { type: "process" };
     else if (type === "log")
@@ -159,14 +165,17 @@ export function ConfigEditor({
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content maxWidth="680px" style={{ maxHeight: "82vh" }}>
-        <Dialog.Title>Edit {app.name}</Dialog.Title>
-        <Dialog.Description size="2" color="gray" mb="3">
-          Changes are saved to Harbor's registry — your project's source is never
-          touched.
-        </Dialog.Description>
+      <Dialog.Content maxWidth="820px" className="config-dialog">
+        <div className="config-dialog-head">
+          <div className="page-eyebrow">Project settings</div>
+          <Dialog.Title>Edit {app.name}</Dialog.Title>
+          <Dialog.Description size="2" color="gray" mb="3">
+            Changes are saved to Harbor's registry — your project's source is
+            never touched.
+          </Dialog.Description>
+        </div>
 
-        <div style={{ overflowY: "auto", maxHeight: "58vh", paddingRight: 4 }}>
+        <div className="config-scroll">
           {/* Services */}
           <Flex align="center" justify="between" mb="2">
             <Text size="2" weight="bold">
@@ -179,7 +188,7 @@ export function ConfigEditor({
 
           <Flex direction="column" gap="3">
             {draft.services.map((s, i) => (
-              <div className="field" key={i} style={{ margin: 0 }}>
+              <div className="field config-service-card" key={i}>
                 <Flex gap="2" align="center" mb="2">
                   <TextField.Root
                     style={{ flex: 1, fontWeight: 600 }}
@@ -192,6 +201,7 @@ export function ConfigEditor({
                     variant="soft"
                     color="gray"
                     onClick={() => removeService(i)}
+                    aria-label={`Remove ${s.name || `service ${i + 1}`}`}
                   >
                     <TrashIcon />
                   </IconButton>
@@ -201,7 +211,9 @@ export function ConfigEditor({
                   <Labeled label="Command">
                     <TextField.Root
                       value={s.command}
-                      onChange={(e) => patchService(i, { command: e.target.value })}
+                      onChange={(e) =>
+                        patchService(i, { command: e.target.value })
+                      }
                       placeholder="node server.js"
                     />
                   </Labeled>
@@ -268,7 +280,9 @@ export function ConfigEditor({
                       <TextField.Root
                         value={s.healthCheck.pattern}
                         onChange={(e) =>
-                          setHealth(i, "log", { pattern: e.target.value } as any)
+                          setHealth(i, "log", {
+                            pattern: e.target.value,
+                          } as any)
                         }
                       />
                     </Labeled>
@@ -281,7 +295,10 @@ export function ConfigEditor({
                       <Flex gap="2" key={r} align="center">
                         <TextField.Root
                           size="1"
-                          style={{ flex: "0 0 38%", fontFamily: "var(--font-mono)" }}
+                          style={{
+                            flex: "0 0 38%",
+                            fontFamily: "var(--font-mono)",
+                          }}
                           value={k}
                           placeholder="KEY"
                           onChange={(e) => {
@@ -378,7 +395,7 @@ export function ConfigEditor({
           </Flex>
           <Flex direction="column" gap="2">
             {Object.entries(draft.profiles).map(([p, names]) => (
-              <div className="field" key={p} style={{ margin: 0 }}>
+              <div className="field config-profile-card" key={p}>
                 <Flex gap="2" align="center" mb="2">
                   <TextField.Root
                     size="1"
@@ -392,6 +409,7 @@ export function ConfigEditor({
                     variant="soft"
                     color="gray"
                     onClick={() => removeProfile(p)}
+                    aria-label={`Remove ${p} profile`}
                   >
                     <TrashIcon />
                   </IconButton>
@@ -418,7 +436,7 @@ export function ConfigEditor({
           </Text>
         )}
 
-        <Flex gap="3" mt="4" justify="end">
+        <Flex className="config-footer" gap="3" mt="4" justify="end">
           <Dialog.Close>
             <Button variant="soft" color="gray">
               Cancel
@@ -434,33 +452,13 @@ export function ConfigEditor({
 }
 
 function Grid2({ children }: { children: ReactNode }) {
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "1fr 1fr",
-        gap: 10,
-        marginBottom: 10,
-      }}
-    >
-      {children}
-    </div>
-  );
+  return <div className="config-grid">{children}</div>;
 }
 
 function Labeled({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <label style={{ display: "block", marginBottom: 8 }}>
-      <div
-        style={{
-          fontSize: 11,
-          color: "var(--text-3)",
-          marginBottom: 4,
-          fontWeight: 550,
-        }}
-      >
-        {label}
-      </div>
+    <label className="config-labeled">
+      <div className="config-label">{label}</div>
       {children}
     </label>
   );

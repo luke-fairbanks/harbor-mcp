@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Code, Spinner, Switch, Tooltip } from "@radix-ui/themes";
 import {
   ExternalLinkIcon,
+  FileIcon,
+  GlobeIcon,
   PlusIcon,
   ReloadIcon,
   StopIcon,
@@ -10,6 +12,7 @@ import { api } from "../api";
 import type { LocalServer, LocalServerInventory } from "../types";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { startWindowDrag } from "../titlebar";
+import { HarborBeacon } from "./icons";
 
 function serverState(server: LocalServer): {
   label: string;
@@ -38,7 +41,8 @@ function serverState(server: LocalServer): {
     return {
       label: "Project found",
       tone: "accent",
-      description: "Matches a Harbor project, but Harbor is only monitoring it.",
+      description:
+        "Matches a Harbor project, but Harbor is only monitoring it.",
     };
   return {
     label: "Not in Harbor",
@@ -113,13 +117,16 @@ export function LocalServersPanel({
     };
   }, [refresh]);
 
-  const visible = useMemo(
-    () =>
-      (inventory?.servers ?? []).filter(
-        (server) => showAll || server.likelyDev || server.harborInternal,
-      ),
-    [inventory, showAll],
-  );
+  const visible = useMemo(() => {
+    const servers = (inventory?.servers ?? []).filter(
+      (server) => showAll || server.likelyDev || server.harborInternal,
+    );
+    const attentionScore = (server: LocalServer) =>
+      (server.duplicateCount > 1 ? 4 : 0) +
+      (server.networkExposed ? 2 : 0) +
+      (!server.tracked && !server.harborInternal ? 1 : 0);
+    return servers.sort((a, b) => attentionScore(b) - attentionScore(a));
+  }, [inventory, showAll]);
 
   async function stop(server: LocalServer) {
     setStopping(server.leaderPid);
@@ -154,11 +161,12 @@ export function LocalServersPanel({
         className="detail-head local-servers-head"
         onMouseDown={startWindowDrag}
       >
-        <div>
-          <div className="detail-title">Local servers</div>
+        <div className="page-title-block">
+          <div className="page-eyebrow">Machine inventory</div>
+          <h1 className="detail-title">Local servers</h1>
           <div className="detail-sub">
-            TCP listeners owned by your macOS user, matched to projects when
-            Harbor has evidence.
+            See every development listener, spot duplicates, and bring the right
+            process under Harbor control.
           </div>
         </div>
         <Tooltip content="Scan again">
@@ -175,18 +183,25 @@ export function LocalServersPanel({
 
       <div className="detail-body local-servers-body" aria-busy={loading}>
         <div className="server-summary">
-          <span className="chip" data-tone="ok">
-            {inventory?.devCount ?? 0} dev servers
-          </span>
-          <span className="chip" data-tone="accent">
-            {inventory?.mappedCount ?? 0} mapped
-          </span>
-          {(inventory?.duplicateCount ?? 0) > 0 && (
-            <span className="chip" data-tone="warn">
-              {inventory!.duplicateCount} probable duplicate
-              {inventory!.duplicateCount === 1 ? "" : "s"}
-            </span>
-          )}
+          <div className="server-metrics" aria-label="Local server summary">
+            <div className="server-metric" data-tone="accent">
+              <strong>{inventory?.devCount ?? 0}</strong>
+              <span>Development</span>
+            </div>
+            <div className="server-metric" data-tone="ok">
+              <strong>{inventory?.mappedCount ?? 0}</strong>
+              <span>Mapped</span>
+            </div>
+            <div
+              className="server-metric"
+              data-tone={
+                (inventory?.duplicateCount ?? 0) > 0 ? "warn" : "quiet"
+              }
+            >
+              <strong>{inventory?.duplicateCount ?? 0}</strong>
+              <span>Duplicates</span>
+            </div>
+          </div>
           <label className="server-show-all">
             <Switch
               size="1"
@@ -194,7 +209,7 @@ export function LocalServersPanel({
               onCheckedChange={setShowAll}
               disabled={(inventory?.otherCount ?? 0) === 0}
             />
-            Show {inventory?.otherCount ?? 0} other listeners
+            Include {inventory?.otherCount ?? 0} system listeners
           </label>
         </div>
 
@@ -210,15 +225,19 @@ export function LocalServersPanel({
           </div>
         ) : visible.length === 0 ? (
           <div className="server-empty">
-            No local development servers are listening right now.
+            <HarborBeacon size={82} />
+            <strong>The coast is clear</strong>
+            <span>No local development servers are listening right now.</span>
+            <Button size="2" variant="soft" onClick={() => refresh()}>
+              <ReloadIcon /> Scan again
+            </Button>
           </div>
         ) : (
           <div className="server-list" role="list">
             {visible.map((server) => {
               const state = serverState(server);
               const canOpen = server.httpStatus != null;
-              const canViewApp =
-                !!server.matchedApp && !server.harborInternal;
+              const canViewApp = !!server.matchedApp && !server.harborInternal;
               const canAdd =
                 !server.matchedApp &&
                 !!server.projectRoot &&
@@ -231,26 +250,45 @@ export function LocalServersPanel({
                 <article
                   className="server-card"
                   data-duplicate={server.duplicateCount > 1 || undefined}
+                  data-state={state.tone}
+                  data-exposed={server.networkExposed || undefined}
                   key={`${server.pid}:${server.port}`}
                   role="listitem"
                 >
                   <div className="server-card-main">
                     <div className="server-card-title-row">
-                      <h2 className="server-card-title">
-                        {server.displayName}
-                        {canOpen ? (
-                          <button
-                            className="server-port"
-                            onClick={() => openServer(server)}
-                            title={`Open ${server.url}`}
-                            aria-label={`Open ${server.displayName} on port ${server.port}`}
-                          >
-                            :{server.port}
-                          </button>
-                        ) : (
-                          <span className="server-port">:{server.port}</span>
-                        )}
-                      </h2>
+                      <div className="server-identity">
+                        <span className="server-process-mark" aria-hidden>
+                          <GlobeIcon />
+                        </span>
+                        <div className="server-identity-copy">
+                          <h2 className="server-card-title">
+                            {server.displayName}
+                            {canOpen ? (
+                              <button
+                                className="server-port"
+                                onClick={() => openServer(server)}
+                                title={`Open ${server.url}`}
+                                aria-label={`Open ${server.displayName} on port ${server.port}`}
+                              >
+                                :{server.port}
+                                <ExternalLinkIcon />
+                              </button>
+                            ) : (
+                              <span className="server-port">
+                                :{server.port}
+                              </span>
+                            )}
+                          </h2>
+                          <div className="server-description">
+                            {server.pageTitle || server.kind}
+                            {server.pageTitle && <span> · {server.kind}</span>}
+                            {server.httpStatus && (
+                              <span> · HTTP {server.httpStatus}</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
                       <div className="server-badges">
                         {server.duplicateCount > 1 && (
                           <span className="chip" data-tone="warn">
@@ -265,7 +303,7 @@ export function LocalServersPanel({
                               tabIndex={0}
                               aria-label="Network visible: this socket may be reachable by other devices, depending on your firewall"
                             >
-                              network-visible
+                              Network visible
                             </span>
                           </Tooltip>
                         )}
@@ -281,16 +319,9 @@ export function LocalServersPanel({
                       </div>
                     </div>
 
-                    <div className="server-description">
-                      {server.pageTitle || server.kind}
-                      {server.pageTitle && <span> · {server.kind}</span>}
-                      {server.httpStatus && (
-                        <span> · HTTP {server.httpStatus}</span>
-                      )}
-                    </div>
-
                     {displayedPath && (
                       <div className="server-path mono" title={displayedPath}>
+                        <FileIcon aria-hidden />
                         {displayedPath}
                       </div>
                     )}
@@ -312,7 +343,9 @@ export function LocalServersPanel({
                           {server.matchedService && (
                             <span>service {server.matchedService}</span>
                           )}
-                          {server.matchReason && <span>{server.matchReason}</span>}
+                          {server.matchReason && (
+                            <span>{server.matchReason}</span>
+                          )}
                           <span title="Process start time">
                             started {server.startedAt}
                           </span>
@@ -329,29 +362,6 @@ export function LocalServersPanel({
 
                   {hasActions && (
                     <div className="server-actions">
-                      {canOpen && (
-                        <Button
-                          className="server-action server-action-open"
-                          size="1"
-                          variant="soft"
-                          onClick={() => openServer(server)}
-                          aria-label={`Open ${server.displayName} on port ${server.port}`}
-                        >
-                          <ExternalLinkIcon /> <span>Open</span>
-                        </Button>
-                      )}
-                      {canViewApp && (
-                        <Button
-                          className="server-action"
-                          size="1"
-                          variant="soft"
-                          color="gray"
-                          onClick={() => onOpenApp(server.matchedApp!)}
-                          aria-label={`View ${server.matchedApp} in Harbor`}
-                        >
-                          View app
-                        </Button>
-                      )}
                       {canAdd && (
                         <Button
                           className="server-action server-action-add"
@@ -361,6 +371,28 @@ export function LocalServersPanel({
                           aria-label={`Add ${server.displayName} to Harbor`}
                         >
                           <PlusIcon /> <span>Add to Harbor</span>
+                        </Button>
+                      )}
+                      {canViewApp && (
+                        <Button
+                          className="server-action server-action-view"
+                          size="1"
+                          variant="soft"
+                          onClick={() => onOpenApp(server.matchedApp!)}
+                          aria-label={`View ${server.matchedApp} in Harbor`}
+                        >
+                          View project
+                        </Button>
+                      )}
+                      {canOpen && (
+                        <Button
+                          className="server-action server-action-open"
+                          size="1"
+                          variant="soft"
+                          onClick={() => openServer(server)}
+                          aria-label={`Open ${server.displayName} on port ${server.port}`}
+                        >
+                          <ExternalLinkIcon /> <span>Open</span>
                         </Button>
                       )}
                       {server.safeToStop && (

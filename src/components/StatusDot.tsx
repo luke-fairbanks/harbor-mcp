@@ -16,6 +16,14 @@ export const STATUS_TONE: Record<ServiceStatus, string> = {
   exited: "default",
 };
 
+export const STATUS_LABEL: Record<ServiceStatus, string> = {
+  stopped: "Stopped",
+  starting: "Starting",
+  ready: "Ready",
+  unhealthy: "Needs attention",
+  exited: "Exited",
+};
+
 export function StatusDot({ status }: { status: ServiceStatus }) {
   const color = STATUS_COLOR[status];
   return (
@@ -23,6 +31,7 @@ export function StatusDot({ status }: { status: ServiceStatus }) {
       className="status-dot"
       style={{ color, background: color }}
       data-pulse={status === "starting"}
+      aria-hidden="true"
     />
   );
 }
@@ -30,16 +39,18 @@ export function StatusDot({ status }: { status: ServiceStatus }) {
 export function StatusBadge({ status }: { status: ServiceStatus }) {
   const tone = STATUS_TONE[status];
   const color = STATUS_COLOR[status];
+  const label = STATUS_LABEL[status];
   return (
     <span
       className="badge"
       data-tone={tone}
+      aria-label={`Service status: ${label}`}
       style={{
         background: `color-mix(in srgb, ${color} 16%, transparent)`,
         color,
       }}
     >
-      {status}
+      {label}
     </span>
   );
 }

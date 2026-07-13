@@ -12,6 +12,15 @@ export function useFolderDrop(onFolder: (path: string) => void) {
   cb.current = onFolder;
 
   useEffect(() => {
+    const tauriReady = Boolean(
+      (
+        window as typeof window & {
+          __TAURI_INTERNALS__?: { metadata?: unknown };
+        }
+      ).__TAURI_INTERNALS__?.metadata,
+    );
+    if (!tauriReady) return;
+
     let unlisten: (() => void) | undefined;
     let active = true;
     getCurrentWebview()

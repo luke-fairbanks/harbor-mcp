@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Badge, Button, Code, Dialog, Flex, Spinner, Text } from "@radix-ui/themes";
+import { Button, Dialog, Spinner } from "@radix-ui/themes";
 import { DownloadIcon, FileIcon } from "@radix-ui/react-icons";
 import { api, pickFolder } from "../api";
 import type { Detection } from "../types";
+import { HarborBeacon, ProjectGlyph } from "./icons";
 
 export function RegisterDialog({
   open,
@@ -97,90 +98,111 @@ export function RegisterDialog({
         if (!v) reset();
       }}
     >
-      <Dialog.Content maxWidth="560px">
-        <Dialog.Title>Register an app</Dialog.Title>
-        <Dialog.Description size="2" color="gray" mb="3">
-          Choose a project folder. Harbor scans it and proposes a config — nothing
-          runs until you start it.
-        </Dialog.Description>
+      <Dialog.Content maxWidth="620px" className="register-dialog">
+        <div className="register-heading">
+          <div className="page-eyebrow">Project intake</div>
+          <Dialog.Title>Add a project</Dialog.Title>
+          <Dialog.Description size="2" color="gray">
+            Harbor reads the project folder, proposes its services, and waits
+            for you to approve before anything runs.
+          </Dialog.Description>
+        </div>
 
-        <Flex gap="2" align="center" mb="3">
-          <Button onClick={choose} disabled={busy}>
-            <FileIcon /> Choose folder…
-          </Button>
-          {path && (
-            <Code variant="ghost" className="mono" style={{ fontSize: 11 }}>
-              {path}
-            </Code>
-          )}
-        </Flex>
-
-        {scanning && !detection && !error && (
-          <Flex align="center" gap="2" mb="2" style={{ color: "var(--text-2)" }}>
-            <Spinner /> <Text size="2">Scanning project…</Text>
-          </Flex>
-        )}
-
-        {error && (
-          <Text size="1" color="tomato" className="mono" as="p" mb="2">
-            {error}
-          </Text>
-        )}
-
-        {detection && (
-          <div className="field" style={{ margin: "0 0 8px" }}>
-            <Flex align="center" gap="2" mb="2">
-              <Text weight="bold">{detection.proposed.name}</Text>
-              <Badge variant="soft">
+        {!detection ? (
+          <button className="project-picker" onClick={choose} disabled={busy}>
+            <HarborBeacon size={92} />
+            <strong>
+              {busy || scanning
+                ? "Scanning project…"
+                : "Choose a project folder"}
+            </strong>
+            <span>Or drop a folder anywhere on the Harbor window.</span>
+            <span className="project-picker-action">
+              {busy || scanning ? <Spinner size="1" /> : <FileIcon />}
+              {busy || scanning ? "Inspecting files" : "Browse folders"}
+            </span>
+          </button>
+        ) : (
+          <div className="register-review">
+            <div className="register-project-head">
+              <ProjectGlyph name={detection.proposed.name} />
+              <div>
+                <strong>{detection.proposed.name}</strong>
+                <span className="mono">{detection.proposed.root}</span>
+              </div>
+              <span className="chip" data-tone="accent">
                 {detection.proposed.services.length} service
                 {detection.proposed.services.length === 1 ? "" : "s"}
-              </Badge>
-            </Flex>
-            <Flex direction="column" gap="2">
-              {detection.proposed.services.map((s) => (
-                <Flex key={s.name} gap="2" align="baseline">
-                  <span className="chip" data-tone="accent">
-                    {s.name}
-                    {s.port ? `:${s.port}` : ""}
-                  </span>
-                  <Code size="1" variant="ghost" color="gray">
-                    {s.command}
-                  </Code>
-                </Flex>
+              </span>
+            </div>
+
+            <div
+              className="register-services"
+              role="list"
+              aria-label="Detected services"
+            >
+              {detection.proposed.services.map((service) => (
+                <div
+                  className="register-service"
+                  role="listitem"
+                  key={service.name}
+                >
+                  <div className="register-service-name">
+                    <span>{service.name}</span>
+                    {service.port && <code>:{service.port}</code>}
+                  </div>
+                  <code className="register-service-command">
+                    {service.command}
+                  </code>
+                </div>
               ))}
-            </Flex>
-            <Text size="1" color="gray" mt="2" as="div">
-              {detection.notes.map((n, i) => (
-                <div key={i}>· {n}</div>
-              ))}
-            </Text>
+            </div>
+
+            {detection.notes.length > 0 && (
+              <div className="register-notes">
+                {detection.notes.map((note, index) => (
+                  <span key={index}>{note}</span>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
-        <Flex gap="3" mt="4" justify="between" align="center">
-          {path ? (
-            <Button variant="ghost" size="1" onClick={importJson} disabled={busy}>
-              <DownloadIcon /> Import existing harbor.json
-            </Button>
-          ) : (
-            <span />
-          )}
-          <Flex gap="3">
+        {error && (
+          <div className="async-notice mono" data-tone="danger" role="alert">
+            {error}
+          </div>
+        )}
+
+        <div className="register-footer">
+          <div className="register-alternate">
+            {path && (
+              <Button
+                variant="ghost"
+                size="1"
+                onClick={importJson}
+                disabled={busy}
+              >
+                <DownloadIcon /> Import existing harbor.json
+              </Button>
+            )}
+          </div>
+          <div className="register-footer-actions">
             <Dialog.Close>
               <Button variant="soft" color="gray">
                 Cancel
               </Button>
             </Dialog.Close>
-            <Button
-              onClick={register}
-              disabled={
-                !detection || detection.proposed.services.length === 0 || busy
-              }
-            >
-              Register
-            </Button>
-          </Flex>
-        </Flex>
+            {detection && (
+              <Button
+                onClick={register}
+                disabled={detection.proposed.services.length === 0 || busy}
+              >
+                Add to Harbor
+              </Button>
+            )}
+          </div>
+        </div>
       </Dialog.Content>
     </Dialog.Root>
   );

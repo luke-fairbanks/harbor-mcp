@@ -1,17 +1,8 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import {
-  Button,
-  Callout,
-  Code,
-  Heading,
-  Spinner,
-  Text,
-} from "@radix-ui/themes";
+import { Button, Callout, Code, Spinner } from "@radix-ui/themes";
 import {
   CheckCircledIcon,
   CheckIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
   CopyIcon,
   EyeClosedIcon,
   EyeOpenIcon,
@@ -20,12 +11,17 @@ import {
 import { api } from "../api";
 import type { AgentStatus, McpInfo } from "../types";
 
+type AgentKind = "code" | "desktop" | "codex";
+
 function CopyButton({ text, label }: { text: string; label: string }) {
   const [done, setDone] = useState(false);
+
   return (
     <Button
+      className="connections-copy-button"
       size="1"
       variant="soft"
+      aria-label={done ? `${label} copied` : label}
       onClick={async () => {
         try {
           await navigator.clipboard.writeText(text);
@@ -36,12 +32,27 @@ function CopyButton({ text, label }: { text: string; label: string }) {
         setTimeout(() => setDone(false), 1200);
       }}
     >
-      {done ? <CheckIcon /> : <CopyIcon />} {done ? "Copied" : label}
+      {done ? <CheckIcon /> : <CopyIcon />}
+      <span>{done ? "Copied" : label}</span>
     </Button>
   );
 }
 
+function ConnectionsHeader() {
+  return (
+    <header className="connections-header">
+      <p className="connections-eyebrow">AI connections</p>
+      <h1 className="connections-title">One bridge. Every agent.</h1>
+      <p className="connections-intro">
+        Give the tools you already use one safe, local control plane for every
+        project in Harbor.
+      </p>
+    </header>
+  );
+}
+
 function ConnectCard({
+  kind,
   title,
   subtitle,
   connected,
@@ -53,6 +64,7 @@ function ConnectCard({
   onConnect,
   fallback,
 }: {
+  kind: AgentKind;
   title: string;
   subtitle: string;
   connected: boolean;
@@ -64,52 +76,86 @@ function ConnectCard({
   onConnect: () => void;
   fallback: ReactNode;
 }) {
+  const subtitleId = `connections-${kind}-description`;
+
   return (
-    <div className="field" style={{ marginBottom: 12 }}>
-      <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
-        <div style={{ minWidth: 0 }}>
-          <Text weight="bold" size="3" as="div">
-            {title}
-          </Text>
-          <Text size="1" color="gray" as="div">
-            {connected ? connectedHint : subtitle}
-          </Text>
+    <article
+      className="connections-card"
+      data-agent={kind}
+      data-connected={connected || undefined}
+      data-available={available || undefined}
+      aria-labelledby={`connections-${kind}-title`}
+      aria-describedby={subtitleId}
+      aria-busy={busy}
+    >
+      <div className="connections-card-head">
+        <div className="connections-client-mark" data-agent={kind} aria-hidden>
+          {kind === "code" ? ">_" : kind === "desktop" ? "C" : "CX"}
         </div>
+        <div className="connections-card-copy">
+          <h3
+            className="connections-card-title"
+            id={`connections-${kind}-title`}
+          >
+            {title}
+          </h3>
+          <p className="connections-card-subtitle" id={subtitleId}>
+            {connected ? connectedHint : subtitle}
+          </p>
+        </div>
+      </div>
+
+      <div className="connections-card-status-row">
         {connected ? (
-          <span className="row" style={{ gap: 12, flex: "none" }}>
-            <span
-              className="row"
-              style={{ gap: 5, color: "var(--ok)", whiteSpace: "nowrap" }}
-            >
-              <CheckCircledIcon width={16} height={16} />
-              <Text size="2" weight="medium" style={{ color: "var(--ok)" }}>
-                Connected
-              </Text>
-            </span>
-            <Button
-              size="1"
-              variant="soft"
-              color="gray"
-              disabled={busy}
-              onClick={onConnect}
-            >
-              {busy ? <Spinner size="1" /> : "Update"}
-            </Button>
+          <span className="connections-card-status" data-tone="connected">
+            <CheckCircledIcon aria-hidden />
+            Connected
           </span>
         ) : available ? (
-          <Button disabled={busy} onClick={onConnect} style={{ flex: "none" }}>
-            {busy ? <Spinner size="1" /> : null} {connectLabel}
-          </Button>
+          <span className="connections-card-status" data-tone="available">
+            <span className="connections-status-dot" aria-hidden />
+            Ready to connect
+          </span>
         ) : (
-          <Text size="1" color="gray" style={{ flex: "none" }}>
+          <span className="connections-card-status" data-tone="unavailable">
+            <span className="connections-status-dot" aria-hidden />
             {unavailableNote}
-          </Text>
+          </span>
         )}
       </div>
+
       {!connected && !available && (
-        <div style={{ marginTop: 10 }}>{fallback}</div>
+        <div className="connections-card-fallback">{fallback}</div>
       )}
-    </div>
+
+      <div className="connections-card-action">
+        {connected ? (
+          <Button
+            className="connections-action-button"
+            size="2"
+            variant="soft"
+            color="gray"
+            disabled={busy}
+            onClick={onConnect}
+            aria-label={`Update ${title} connection`}
+          >
+            {busy ? <Spinner size="1" /> : null}
+            {busy ? "Updating…" : "Update connection"}
+          </Button>
+        ) : available ? (
+          <Button
+            className="connections-action-button"
+            size="2"
+            disabled={busy}
+            onClick={onConnect}
+            aria-label={`${connectLabel} to Harbor`}
+          >
+            {busy ? <Spinner size="1" /> : null}
+            {busy ? "Connecting…" : connectLabel}
+          </Button>
+        ) : null}
+      </div>
+    </article>
   );
 }
 
@@ -120,9 +166,8 @@ export function SettingsPanel({
 }) {
   const [info, setInfo] = useState<McpInfo | null>(null);
   const [status, setStatus] = useState<AgentStatus | null>(null);
-  const [busy, setBusy] = useState<"code" | "desktop" | "codex" | null>(null);
+  const [busy, setBusy] = useState<AgentKind | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const [showManual, setShowManual] = useState(false);
   const [reveal, setReveal] = useState(false);
   const [infoError, setInfoError] = useState<string | null>(null);
   const [statusLoading, setStatusLoading] = useState(true);
@@ -156,7 +201,7 @@ export function SettingsPanel({
     return () => window.clearInterval(timer);
   }, [refresh, refreshInfo]);
 
-  async function connect(which: "code" | "desktop" | "codex") {
+  async function connect(which: AgentKind) {
     setBusy(which);
     setMsg(null);
     try {
@@ -178,231 +223,301 @@ export function SettingsPanel({
 
   if (!info) {
     return (
-      <div className="settings">
-        <div className="settings-inner">
-          <Heading size="5" mb="2">
-            Connect your AI agents
-          </Heading>
-          {infoError ? (
-            <Callout.Root color="tomato" variant="surface" size="1">
-              <Callout.Icon>
-                <InfoCircledIcon />
-              </Callout.Icon>
-              <Callout.Text>
-                Could not load MCP status: {infoError}
-              </Callout.Text>
-            </Callout.Root>
-          ) : (
-            <Text size="2" color="gray">
-              Loading Harbor MCP status…
-            </Text>
-          )}
+      <div className="settings connections-page">
+        <div className="settings-inner connections-page-inner">
+          <ConnectionsHeader />
+          <div className="connections-loading" aria-live="polite">
+            {infoError ? (
+              <Callout.Root
+                color="tomato"
+                variant="surface"
+                size="1"
+                role="alert"
+              >
+                <Callout.Icon>
+                  <InfoCircledIcon />
+                </Callout.Icon>
+                <Callout.Text>
+                  Could not load MCP status: {infoError}
+                </Callout.Text>
+              </Callout.Root>
+            ) : (
+              <div className="connections-loading-state" role="status">
+                <Spinner size="2" />
+                <span>Waking the Harbor MCP bridge…</span>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
   }
+
   const token = reveal ? info.token : "•".repeat(40);
   const mcpHealthy = info.healthy && !infoError;
   const codexToml = `[mcp_servers.harbor]\nurl = "${info.url}"\nhttp_headers = { Authorization = "Bearer ${info.token}" }\ndefault_tools_approval_mode = "writes"`;
 
   return (
-    <div className="settings">
-      <div className="settings-inner">
-        <Heading size="5" mb="1" style={{ letterSpacing: "-0.02em" }}>
-          Connect your AI agents
-        </Heading>
-        <Text size="2" color="gray">
-          Give Claude or Codex one safe control plane for local projects. One
-          click:
-        </Text>
+    <div className="settings connections-page">
+      <div className="settings-inner connections-page-inner">
+        <ConnectionsHeader />
 
-        <div className="row" style={{ margin: "14px 0 16px", gap: 10 }}>
-          <span className="chip" data-tone={mcpHealthy ? "ok" : "danger"}>
-            ● {mcpHealthy ? "serving" : "offline"}
-          </span>
-          <Code variant="ghost" className="mono">
-            {info.url}
-          </Code>
+        <section
+          className="bridge-hero"
+          data-healthy={mcpHealthy || undefined}
+          aria-labelledby="bridge-title"
+        >
+          <div className="bridge-beacon" aria-hidden>
+            <span className="bridge-beacon-core" />
+            <span className="bridge-beacon-ring" />
+          </div>
+          <div className="bridge-main">
+            <p className="bridge-kicker">Harbor MCP bridge</p>
+            <h2 className="bridge-title" id="bridge-title">
+              Local control plane
+            </h2>
+            <div className="bridge-endpoint">
+              <Code variant="ghost" className="mono">
+                {info.url}
+              </Code>
+              <CopyButton text={info.url} label="Copy address" />
+            </div>
+          </div>
+          <div className="bridge-status" aria-live="polite">
+            <span className="bridge-status-dot" aria-hidden />
+            <span>{mcpHealthy ? "Online" : "Offline"}</span>
+          </div>
+          <div className="bridge-meta">
+            <span>Loopback only</span>
+            <span aria-hidden>·</span>
+            <span>Token protected</span>
+            <span aria-hidden>·</span>
+            <span>v{info.version}</span>
+          </div>
+        </section>
+
+        <div
+          className="connections-feedback"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {msg && (
+            <Callout.Root
+              color={msg.ok ? "green" : "tomato"}
+              variant="surface"
+              size="1"
+              role={msg.ok ? "status" : "alert"}
+            >
+              <Callout.Icon>
+                {msg.ok ? <CheckCircledIcon /> : <InfoCircledIcon />}
+              </Callout.Icon>
+              <Callout.Text className="mono">{msg.text}</Callout.Text>
+            </Callout.Root>
+          )}
+
+          {statusError && (
+            <Callout.Root
+              color="tomato"
+              variant="surface"
+              size="1"
+              role="alert"
+            >
+              <Callout.Icon>
+                <InfoCircledIcon />
+              </Callout.Icon>
+              <Callout.Text>
+                Could not inspect installed AI clients. {statusError}{" "}
+                <Button size="1" variant="ghost" onClick={refresh}>
+                  Retry
+                </Button>
+              </Callout.Text>
+            </Callout.Root>
+          )}
         </div>
 
-        {msg && (
-          <Callout.Root
-            color={msg.ok ? "green" : "tomato"}
-            variant="surface"
-            mb="3"
-            size="1"
-          >
-            <Callout.Icon>
-              {msg.ok ? <CheckCircledIcon /> : <InfoCircledIcon />}
-            </Callout.Icon>
-            <Callout.Text className="mono" style={{ fontSize: 12 }}>
-              {msg.text}
-            </Callout.Text>
-          </Callout.Root>
-        )}
-
-        {statusError && (
-          <Callout.Root color="tomato" variant="surface" mb="3" size="1">
-            <Callout.Icon>
-              <InfoCircledIcon />
-            </Callout.Icon>
-            <Callout.Text>
-              Could not inspect installed AI clients. {statusError}{" "}
-              <Button size="1" variant="ghost" onClick={refresh}>
-                Retry
-              </Button>
-            </Callout.Text>
-          </Callout.Root>
-        )}
-
-        {statusLoading && !status ? (
-          <div className="row" style={{ margin: "12px 0 16px", gap: 8 }}>
-            <Spinner size="1" />
-            <Text size="2" color="gray">
-              Detecting installed AI clients…
-            </Text>
-          </div>
-        ) : status ? (
-          <>
-            <ConnectCard
-              title="Claude Code"
-              subtitle="Add Harbor to the Claude CLI (user scope)."
-              connected={status?.codeConnected ?? false}
-              available={status?.codeCli ?? false}
-              unavailableNote="CLI not found"
-              connectedHint="Connected · run /mcp in Claude Code to use it."
-              connectLabel="Connect"
-              busy={busy === "code"}
-              onConnect={() => connect("code")}
-              fallback={
-                <>
-                  <Text size="1" color="gray" as="div" mb="1">
-                    The <Code>claude</Code> CLI wasn't found. Run this in your
-                    terminal:
-                  </Text>
-                  <div
-                    className="row"
-                    style={{ gap: 8, alignItems: "flex-start" }}
-                  >
-                    <div className="code-block" style={{ flex: 1 }}>
-                      {info.claudeAddCommand}
-                    </div>
-                    <CopyButton text={info.claudeAddCommand} label="Copy" />
-                  </div>
-                </>
-              }
-            />
-
-            <ConnectCard
-              title="Claude Desktop"
-              subtitle="Add Harbor to claude_desktop_config.json."
-              connected={status?.desktopConnected ?? false}
-              available={status?.desktopInstalled ?? false}
-              unavailableNote="Not detected"
-              connectedHint="Added · restart Claude Desktop to use it."
-              connectLabel="Add to Claude Desktop"
-              busy={busy === "desktop"}
-              onConnect={() => connect("desktop")}
-              fallback={
-                <>
-                  <Text size="1" color="gray" as="div" mb="1">
-                    Claude Desktop wasn't detected. Add this to its config
-                    manually:
-                  </Text>
-                  <div
-                    className="row"
-                    style={{ justifyContent: "flex-end", marginBottom: 6 }}
-                  >
-                    <CopyButton text={info.desktopJson} label="Copy JSON" />
-                  </div>
-                  <div className="code-block">{info.desktopJson}</div>
-                </>
-              }
-            />
-
-            <ConnectCard
-              title="Codex"
-              subtitle="Add Harbor to ~/.codex/config.toml."
-              connected={status?.codexConnected ?? false}
-              available={status?.codexInstalled ?? false}
-              unavailableNote="Not detected"
-              connectedHint="Added · restart Codex to use it."
-              connectLabel="Connect Codex"
-              busy={busy === "codex"}
-              onConnect={() => connect("codex")}
-              fallback={
-                <>
-                  <Text size="1" color="gray" as="div" mb="1">
-                    Codex wasn't detected. Add this to{" "}
-                    <Code>~/.codex/config.toml</Code>:
-                  </Text>
-                  <div
-                    className="row"
-                    style={{ justifyContent: "flex-end", marginBottom: 6 }}
-                  >
-                    <CopyButton text={codexToml} label="Copy TOML" />
-                  </div>
-                  <div className="code-block">{codexToml}</div>
-                </>
-              }
-            />
-          </>
-        ) : null}
-
-        <button
-          className="foot-btn"
-          style={{ width: "auto", padding: "6px 8px", marginTop: 4 }}
-          onClick={() => setShowManual((s) => !s)}
+        <section
+          className="connections-section"
+          aria-labelledby="connections-agents-title"
         >
-          {showManual ? <ChevronDownIcon /> : <ChevronRightIcon />} Manual setup
-          & token
-        </button>
+          <div className="connections-section-header">
+            <div>
+              <p className="connections-eyebrow">Available connections</p>
+              <h2
+                className="connections-section-title"
+                id="connections-agents-title"
+              >
+                Bring your agents aboard
+              </h2>
+            </div>
+            <p className="connections-section-copy">
+              Connect once, then let each agent discover and manage the same
+              local projects.
+            </p>
+          </div>
 
-        {showManual && (
-          <div style={{ marginTop: 8 }}>
-            <div className="field">
-              <div className="field-label">
-                Bearer token
-                <span className="row" style={{ gap: 4 }}>
-                  <Button
-                    size="1"
-                    variant="ghost"
-                    onClick={() => setReveal((r) => !r)}
-                  >
-                    {reveal ? <EyeClosedIcon /> : <EyeOpenIcon />}
-                  </Button>
-                  <CopyButton text={info.token} label="Copy" />
-                </span>
-              </div>
-              <div className="code-block">{token}</div>
+          {statusLoading && !status ? (
+            <div className="connections-detecting" role="status">
+              <Spinner size="1" />
+              <span>Detecting installed AI clients…</span>
             </div>
-            <div className="field">
-              <div className="field-label">
-                Claude Code command
-                <CopyButton text={info.claudeAddCommand} label="Copy" />
-              </div>
-              <div className="code-block">{info.claudeAddCommand}</div>
+          ) : status ? (
+            <div className="connections-grid">
+              <ConnectCard
+                kind="code"
+                title="Claude Code"
+                subtitle="Connect the Claude CLI at user scope."
+                connected={status.codeConnected}
+                available={status.codeCli}
+                unavailableNote="CLI not found"
+                connectedHint="Ready in Claude Code. Run /mcp to use Harbor."
+                connectLabel="Connect Claude Code"
+                busy={busy === "code"}
+                onConnect={() => connect("code")}
+                fallback={
+                  <>
+                    <p className="connections-fallback-copy">
+                      Run this command in your terminal:
+                    </p>
+                    <div className="connections-code-row">
+                      <div className="code-block connections-code-block">
+                        {info.claudeAddCommand}
+                      </div>
+                      <CopyButton text={info.claudeAddCommand} label="Copy" />
+                    </div>
+                  </>
+                }
+              />
+
+              <ConnectCard
+                kind="desktop"
+                title="Claude Desktop"
+                subtitle="Add Harbor to the Claude Desktop app."
+                connected={status.desktopConnected}
+                available={status.desktopInstalled}
+                unavailableNote="App not detected"
+                connectedHint="Added. Restart Claude Desktop to use Harbor."
+                connectLabel="Connect Desktop"
+                busy={busy === "desktop"}
+                onConnect={() => connect("desktop")}
+                fallback={
+                  <>
+                    <p className="connections-fallback-copy">
+                      Add the MCP entry to Claude Desktop manually:
+                    </p>
+                    <div className="connections-code-row">
+                      <div className="code-block connections-code-block">
+                        {info.desktopJson}
+                      </div>
+                      <CopyButton text={info.desktopJson} label="Copy JSON" />
+                    </div>
+                  </>
+                }
+              />
+
+              <ConnectCard
+                kind="codex"
+                title="Codex"
+                subtitle="Connect Harbor through your Codex config."
+                connected={status.codexConnected}
+                available={status.codexInstalled}
+                unavailableNote="App not detected"
+                connectedHint="Added. Restart Codex to use Harbor."
+                connectLabel="Connect Codex"
+                busy={busy === "codex"}
+                onConnect={() => connect("codex")}
+                fallback={
+                  <>
+                    <p className="connections-fallback-copy">
+                      Add this entry to <Code>~/.codex/config.toml</Code>:
+                    </p>
+                    <div className="connections-code-row">
+                      <div className="code-block connections-code-block">
+                        {codexToml}
+                      </div>
+                      <CopyButton text={codexToml} label="Copy TOML" />
+                    </div>
+                  </>
+                }
+              />
             </div>
-            <div className="field">
-              <div className="field-label">
-                Claude Desktop JSON
-                <CopyButton text={info.desktopJson} label="Copy" />
-              </div>
-              <div className="code-block">{info.desktopJson}</div>
+          ) : null}
+        </section>
+
+        <details className="connections-advanced">
+          <summary className="connections-advanced-summary">
+            <span>
+              <span className="connections-advanced-title">Advanced setup</span>
+              <span className="connections-advanced-subtitle">
+                Token and manual client configuration
+              </span>
+            </span>
+          </summary>
+
+          <div className="connections-advanced-content">
+            <div className="connections-config-grid">
+              <section className="connections-config-card">
+                <div className="connections-config-header">
+                  <h3>Bearer token</h3>
+                  <div className="connections-config-actions">
+                    <Button
+                      size="1"
+                      variant="ghost"
+                      onClick={() => setReveal((r) => !r)}
+                      aria-label={
+                        reveal ? "Hide bearer token" : "Reveal bearer token"
+                      }
+                      aria-pressed={reveal}
+                    >
+                      {reveal ? <EyeClosedIcon /> : <EyeOpenIcon />}
+                      {reveal ? "Hide" : "Reveal"}
+                    </Button>
+                    <CopyButton text={info.token} label="Copy token" />
+                  </div>
+                </div>
+                <div className="code-block connections-code-block">{token}</div>
+              </section>
+
+              <section className="connections-config-card">
+                <div className="connections-config-header">
+                  <h3>Claude Code command</h3>
+                  <CopyButton text={info.claudeAddCommand} label="Copy" />
+                </div>
+                <div className="code-block connections-code-block">
+                  {info.claudeAddCommand}
+                </div>
+              </section>
+
+              <section className="connections-config-card">
+                <div className="connections-config-header">
+                  <h3>Claude Desktop JSON</h3>
+                  <CopyButton text={info.desktopJson} label="Copy JSON" />
+                </div>
+                <div className="code-block connections-code-block">
+                  {info.desktopJson}
+                </div>
+              </section>
+
+              <section className="connections-config-card">
+                <div className="connections-config-header">
+                  <h3>Codex TOML</h3>
+                  <CopyButton text={codexToml} label="Copy TOML" />
+                </div>
+                <div className="code-block connections-code-block">
+                  {codexToml}
+                </div>
+              </section>
             </div>
           </div>
-        )}
+        </details>
 
-        <Callout.Root color="gray" variant="surface" mt="2" size="1">
-          <Callout.Icon>
-            <InfoCircledIcon />
-          </Callout.Icon>
-          <Callout.Text>
-            Harbor MCP v{info.version} is bound to 127.0.0.1 only and guarded by
-            this token. After connecting, ask your agent to{" "}
+        <aside className="connections-security-note" aria-label="MCP security">
+          <InfoCircledIcon aria-hidden />
+          <p>
+            Harbor only listens on <Code>127.0.0.1</Code> and requires this
+            bearer token. After connecting, ask your agent to{" "}
             <Code>list_local_servers</Code> before starting a project.
-          </Callout.Text>
-        </Callout.Root>
+          </p>
+        </aside>
       </div>
     </div>
   );
