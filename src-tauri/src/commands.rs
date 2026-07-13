@@ -361,21 +361,41 @@ pub struct AgentStatus {
     /// `claude` CLI is installed and found.
     #[serde(rename = "codeCli")]
     pub code_cli: bool,
-    /// Harbor is registered in Claude Code (user scope).
-    #[serde(rename = "codeConnected")]
-    pub code_connected: bool,
+    /// Harbor's Claude Code configuration and observed runtime state.
+    pub code: AgentConnection,
     /// Claude Desktop appears installed (its config dir exists).
     #[serde(rename = "desktopInstalled")]
     pub desktop_installed: bool,
-    /// Harbor is present in claude_desktop_config.json.
-    #[serde(rename = "desktopConnected")]
-    pub desktop_connected: bool,
+    /// Harbor's Claude Desktop configuration and observed runtime state.
+    pub desktop: AgentConnection,
     /// `codex` CLI found, or a ~/.codex config exists.
     #[serde(rename = "codexInstalled")]
     pub codex_installed: bool,
-    /// Harbor is present in ~/.codex/config.toml.
-    #[serde(rename = "codexConnected")]
-    pub codex_connected: bool,
+    /// Harbor's Codex configuration and observed runtime state.
+    pub codex: AgentConnection,
+}
+
+/// Configuration and runtime are deliberately separate. An entry in a config
+/// file does not mean the client launched Harbor's bridge, and a bridge process
+/// alone cannot prove the client accepted Harbor's tool catalog.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConnection {
+    pub configured: bool,
+    /// A current Harbor bridge process is running below this client.
+    pub bridge_running: bool,
+    /// The client predates its config or Harbor's current endpoint descriptor.
+    pub restart_required: bool,
+    /// A running client has not launched its current Harbor bridge.
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ProcessInfo {
+    pid: u32,
+    parent: u32,
+    age: std::time::Duration,
+    command: String,
 }
 
 fn claude_desktop_config_path() -> Option<PathBuf> {
@@ -539,10 +559,169 @@ fn claude_code_add_args(settings: &str, npx: &str, bridge: &str) -> Vec<String> 
     ]
 }
 
+#[derive(Clone, Copy)]
+enum AgentKind {
+    ClaudeCode,
+    ClaudeDesktop,
+    Codex,
+}
+
+fn parse_process_age(value: &str) -> Option<std::time::Duration> {
+    let (days, clock) = match value.split_once('-') {
+        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
+        None => (0, value),
+    };
+    let parts = clock
+        .split(':')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let seconds = match parts.as_slice() {
+        [minutes, seconds] => minutes * 60 + seconds,
+        [hours, minutes, seconds] => hours * 3600 + minutes * 60 + seconds,
+        _ => return None,
+    };
+    Some(std::time::Duration::from_secs(days * 86_400 + seconds))
+}
+
+fn process_snapshot() -> Vec<ProcessInfo> {
+    let output = match std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,etime=,command="])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let parent = fields.next()?.parse().ok()?;
+            let age = parse_process_age(fields.next()?)?;
+            let command = fields.collect::<Vec<_>>().join(" ");
+            Some(ProcessInfo {
+                pid,
+                parent,
+                age,
+                command,
+            })
+        })
+        .collect()
+}
+
+fn is_agent_root(process: &ProcessInfo, kind: AgentKind, resolved_cli: Option<&str>) -> bool {
+    let command = process.command.to_ascii_lowercase();
+    match kind {
+        AgentKind::ClaudeDesktop => {
+            command.contains("/claude.app/contents/macos/claude")
+                && !command.contains("claude helper")
+        }
+        AgentKind::Codex => {
+            command.contains("/contents/resources/codex") && command.contains("app-server")
+                || command.contains("/codex.app/contents/macos/codex")
+                || resolved_cli.is_some_and(|cli| process.command.starts_with(cli))
+        }
+        AgentKind::ClaudeCode => {
+            resolved_cli.is_some_and(|cli| process.command.starts_with(cli))
+                && !command.contains("/claude.app/contents/macos/claude")
+        }
+    }
+}
+
+fn has_ancestor(
+    start: u32,
+    roots: &std::collections::HashSet<u32>,
+    parents: &std::collections::HashMap<u32, u32>,
+) -> bool {
+    let mut current = start;
+    for _ in 0..64 {
+        if roots.contains(&current) {
+            return true;
+        }
+        let Some(parent) = parents.get(&current).copied() else {
+            return false;
+        };
+        if parent == 0 || parent == current {
+            return false;
+        }
+        current = parent;
+    }
+    false
+}
+
+struct ConnectionTarget<'a> {
+    configured: bool,
+    config_path: Option<&'a std::path::Path>,
+    kind: AgentKind,
+    resolved_cli: Option<&'a str>,
+    client_name: &'a str,
+}
+
+fn connection_state(
+    target: ConnectionTarget<'_>,
+    descriptor_age: Option<std::time::Duration>,
+    processes: &[ProcessInfo],
+    bridge: &str,
+    endpoint: &str,
+) -> AgentConnection {
+    if !target.configured {
+        return AgentConnection::default();
+    }
+
+    let roots = processes
+        .iter()
+        .filter(|process| is_agent_root(process, target.kind, target.resolved_cli))
+        .map(|process| process.pid)
+        .collect::<std::collections::HashSet<_>>();
+    let parents = processes
+        .iter()
+        .map(|process| (process.pid, process.parent))
+        .collect::<std::collections::HashMap<_, _>>();
+    let bridge_processes = processes.iter().filter(|process| {
+        let is_bridge = process.command.contains(bridge)
+            || (process.command.contains("mcp-remote") && process.command.contains(endpoint));
+        is_bridge && has_ancestor(process.pid, &roots, &parents)
+    });
+    let mut bridge_found = false;
+    let bridge_running = bridge_processes.fold(false, |current, process| {
+        bridge_found = true;
+        current || descriptor_age.is_some_and(|age| process.age <= age)
+    });
+    let stale_bridge = bridge_found && !bridge_running;
+
+    let config_age = target
+        .config_path
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.elapsed().ok());
+    let restart_required = !bridge_running
+        && (stale_bridge
+            || (!roots.is_empty()
+                && config_age.is_some_and(|age| {
+                    processes
+                        .iter()
+                        .filter(|process| roots.contains(&process.pid))
+                        .all(|process| process.age > age)
+                })));
+    let error = (!roots.is_empty() && !bridge_running && !restart_required).then(|| {
+        format!(
+            "{} is running but has not launched Harbor's bridge. Fully quit and reopen it.",
+            target.client_name
+        )
+    });
+
+    AgentConnection {
+        configured: target.configured,
+        bridge_running,
+        restart_required,
+        error,
+    }
+}
+
 #[tauri::command]
 pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatus, String> {
     let expected_url = format!("http://127.0.0.1:{}/mcp", state.mcp.port);
-    let expected_auth = format!("Bearer {}", state.mcp.token);
     let expected_bridge = state.store.bridge_path().to_string_lossy().into_owned();
     let expected_settings = state.store.settings_path().to_string_lossy().into_owned();
     let expected_npx =
@@ -552,21 +731,15 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
         .unwrap_or(false);
     let claude = crate::sysenv::resolve_bin("claude");
     let code_cli = claude.is_some();
-    let mut code_connected = false;
-    if let Some(path) = claude_code_config_path() {
+    let code_config = claude_code_config_path();
+    let mut code_configured = false;
+    if let Some(path) = &code_config {
         if let Ok(text) = std::fs::read_to_string(path) {
             if let Ok(config) = serde_json::from_str::<serde_json::Value>(&text) {
                 if let Some(entry) = config
                     .get("mcpServers")
                     .and_then(|servers| servers.get("harbor"))
                 {
-                    let native_http = entry.get("url").and_then(|value| value.as_str())
-                        == Some(expected_url.as_str())
-                        && entry
-                            .get("headers")
-                            .and_then(|headers| headers.get("Authorization"))
-                            .and_then(|value| value.as_str())
-                            == Some(expected_auth.as_str());
                     let npx_matches = expected_npx.as_deref().is_some_and(|expected| {
                         entry
                             .get("env")
@@ -583,7 +756,7 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
                             .and_then(|value| value.as_str())
                             == Some(expected_settings.as_str())
                         && npx_matches;
-                    code_connected = native_http || stable_bridge;
+                    code_configured = stable_bridge;
                 }
             }
         }
@@ -598,27 +771,14 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
         || std::env::var("HOME")
             .ok()
             .is_some_and(|home| PathBuf::from(home).join("Applications/Claude.app").exists());
-    let mut desktop_connected = false;
+    let mut desktop_configured = false;
     if let Some(p) = &cfg {
         if let Ok(text) = std::fs::read_to_string(p) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                desktop_connected = v
+                desktop_configured = v
                     .get("mcpServers")
                     .and_then(|m| m.get("harbor"))
                     .map(|entry| {
-                        let has_url = entry
-                            .get("args")
-                            .and_then(|a| a.as_array())
-                            .map(|args| {
-                                args.iter()
-                                    .any(|v| v.as_str() == Some(expected_url.as_str()))
-                            })
-                            .unwrap_or(false);
-                        let has_token = entry
-                            .get("env")
-                            .and_then(|e| e.get("HARBOR_AUTH"))
-                            .and_then(|v| v.as_str())
-                            == Some(expected_auth.as_str());
                         let npx_matches = expected_npx.as_deref().is_some_and(|expected| {
                             entry
                                 .get("env")
@@ -635,7 +795,7 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
                                 .and_then(|v| v.as_str())
                                 == Some(expected_settings.as_str())
                             && npx_matches;
-                        (has_url && has_token) || has_bridge
+                        has_bridge
                     })
                     .unwrap_or(false);
             }
@@ -643,18 +803,19 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
     }
 
     // Codex
-    let codex_cli = crate::sysenv::resolve_bin("codex").is_some();
+    let codex_bin = crate::sysenv::resolve_bin("codex");
+    let codex_cli = codex_bin.is_some();
     let cxp = codex_config_path();
     let codex_installed = codex_cli
         || cxp
             .as_ref()
             .map(|p| p.exists() || p.parent().map(|d| d.exists()).unwrap_or(false))
             .unwrap_or(false);
-    let mut codex_connected = false;
+    let mut codex_configured = false;
     if let Some(p) = &cxp {
         if let Ok(text) = std::fs::read_to_string(p) {
             if let Ok(doc) = text.parse::<toml_edit::DocumentMut>() {
-                codex_connected = doc
+                codex_configured = doc
                     .get("mcp_servers")
                     .and_then(|t| t.as_table_like())
                     .and_then(|t| t.get("harbor"))
@@ -664,10 +825,6 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
                             None => true,
                             Some(value) => value.as_bool() == Some(true),
                         };
-                        let url_ok = harbor.get("url").and_then(|v| v.as_str())
-                            == Some(expected_url.as_str());
-                        let auth_ok = toml_nested_str(harbor.get("http_headers"), "Authorization")
-                            == Some(expected_auth.as_str());
                         let npx_matches = expected_npx.as_deref().is_some_and(|expected| {
                             toml_nested_str(harbor.get("env"), "HARBOR_NPX") == Some(expected)
                         });
@@ -677,20 +834,65 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
                             && toml_nested_str(harbor.get("env"), "HARBOR_SETTINGS")
                                 == Some(expected_settings.as_str())
                             && npx_matches;
-                        enabled && ((url_ok && auth_ok) || bridge_ok)
+                        enabled && bridge_ok
                     })
                     .unwrap_or(false);
             }
         }
     }
 
+    let processes = process_snapshot();
+    let descriptor_age = std::fs::metadata(state.store.settings_path())
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.elapsed().ok());
+    let code = connection_state(
+        ConnectionTarget {
+            configured: code_configured,
+            config_path: code_config.as_deref(),
+            kind: AgentKind::ClaudeCode,
+            resolved_cli: claude.as_deref().and_then(std::path::Path::to_str),
+            client_name: "Claude Code",
+        },
+        descriptor_age,
+        &processes,
+        &expected_bridge,
+        &expected_url,
+    );
+    let desktop = connection_state(
+        ConnectionTarget {
+            configured: desktop_configured,
+            config_path: cfg.as_deref(),
+            kind: AgentKind::ClaudeDesktop,
+            resolved_cli: None,
+            client_name: "Claude Desktop",
+        },
+        descriptor_age,
+        &processes,
+        &expected_bridge,
+        &expected_url,
+    );
+    let codex = connection_state(
+        ConnectionTarget {
+            configured: codex_configured,
+            config_path: cxp.as_deref(),
+            kind: AgentKind::Codex,
+            resolved_cli: codex_bin.as_deref().and_then(std::path::Path::to_str),
+            client_name: "Codex",
+        },
+        descriptor_age,
+        &processes,
+        &expected_bridge,
+        &expected_url,
+    );
+
     Ok(AgentStatus {
         code_cli,
-        code_connected,
+        code,
         desktop_installed,
-        desktop_connected,
+        desktop,
         codex_installed,
-        codex_connected,
+        codex,
     })
 }
 
@@ -717,7 +919,7 @@ pub async fn connect_claude_code(state: State<'_, Arc<AppState>>) -> Result<Stri
         .map_err(|e| e.to_string())?;
 
     if out.status.success() {
-        Ok("Connected to Claude Code with Harbor's restart-safe launcher.".to_string())
+        Ok("Configured Claude Code with Harbor's restart-safe launcher.".to_string())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
@@ -832,7 +1034,7 @@ pub async fn connect_codex(state: State<'_, Arc<AppState>>) -> Result<String, St
 
     write_private_atomic(&p, &doc.to_string())?;
     Ok(
-        "Connected to Codex with Harbor's restart-safe launcher — restart Codex to use it."
+        "Configured Codex with Harbor's restart-safe launcher — restart Codex to load it."
             .to_string(),
     )
 }
@@ -1016,6 +1218,150 @@ pub fn build_mcp_info(token: &str, port: u16, healthy: bool) -> McpInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status_test_config() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "harbor-agent-status-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&path, "configured").unwrap();
+        path
+    }
+
+    fn desktop_process(pid: u32, parent: u32, age_secs: u64, command: &str) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            parent,
+            age: std::time::Duration::from_secs(age_secs),
+            command: command.to_string(),
+        }
+    }
+
+    #[test]
+    fn parses_ps_elapsed_time() {
+        assert_eq!(parse_process_age("05:09").unwrap().as_secs(), 309);
+        assert_eq!(parse_process_age("02:03:04").unwrap().as_secs(), 7_384);
+        assert_eq!(parse_process_age("2-03:04:05").unwrap().as_secs(), 183_845);
+        assert!(parse_process_age("not-an-age").is_none());
+    }
+
+    #[test]
+    fn finds_a_runtime_process_through_its_ancestors() {
+        let roots = std::collections::HashSet::from([10]);
+        let parents = std::collections::HashMap::from([(30, 20), (20, 10), (10, 1)]);
+        assert!(has_ancestor(30, &roots, &parents));
+        assert!(!has_ancestor(40, &roots, &parents));
+    }
+
+    #[test]
+    fn running_bridge_suppresses_restart_required() {
+        let config = status_test_config();
+        let processes = vec![
+            desktop_process(10, 1, 60, "/Applications/Claude.app/Contents/MacOS/Claude"),
+            desktop_process(20, 10, 30, "/tmp/harbor-mcp-bridge"),
+        ];
+        let state = connection_state(
+            ConnectionTarget {
+                configured: true,
+                config_path: Some(&config),
+                kind: AgentKind::ClaudeDesktop,
+                resolved_cli: None,
+                client_name: "Claude Desktop",
+            },
+            Some(std::time::Duration::from_secs(120)),
+            &processes,
+            "/tmp/harbor-mcp-bridge",
+            "http://127.0.0.1:7777/mcp",
+        );
+        let _ = std::fs::remove_file(config);
+        assert!(state.bridge_running);
+        assert!(!state.restart_required);
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn config_newer_than_running_client_requires_restart() {
+        let config = status_test_config();
+        let processes = vec![desktop_process(
+            10,
+            1,
+            60,
+            "/Applications/Claude.app/Contents/MacOS/Claude",
+        )];
+        let state = connection_state(
+            ConnectionTarget {
+                configured: true,
+                config_path: Some(&config),
+                kind: AgentKind::ClaudeDesktop,
+                resolved_cli: None,
+                client_name: "Claude Desktop",
+            },
+            Some(std::time::Duration::from_secs(120)),
+            &processes,
+            "/tmp/harbor-mcp-bridge",
+            "http://127.0.0.1:7777/mcp",
+        );
+        let _ = std::fs::remove_file(config);
+        assert!(!state.bridge_running);
+        assert!(state.restart_required);
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn running_current_client_without_bridge_reports_error() {
+        let config = status_test_config();
+        let processes = vec![desktop_process(
+            10,
+            1,
+            0,
+            "/Applications/Claude.app/Contents/MacOS/Claude",
+        )];
+        let state = connection_state(
+            ConnectionTarget {
+                configured: true,
+                config_path: Some(&config),
+                kind: AgentKind::ClaudeDesktop,
+                resolved_cli: None,
+                client_name: "Claude Desktop",
+            },
+            Some(std::time::Duration::from_secs(120)),
+            &processes,
+            "/tmp/harbor-mcp-bridge",
+            "http://127.0.0.1:7777/mcp",
+        );
+        let _ = std::fs::remove_file(config);
+        assert!(!state.restart_required);
+        assert!(state
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("has not launched")));
+    }
+
+    #[test]
+    fn bridge_older_than_current_descriptor_requires_restart() {
+        let config = status_test_config();
+        let processes = vec![
+            desktop_process(10, 1, 300, "/Applications/Claude.app/Contents/MacOS/Claude"),
+            desktop_process(20, 10, 180, "/tmp/harbor-mcp-bridge"),
+        ];
+        let state = connection_state(
+            ConnectionTarget {
+                configured: true,
+                config_path: Some(&config),
+                kind: AgentKind::ClaudeDesktop,
+                resolved_cli: None,
+                client_name: "Claude Desktop",
+            },
+            Some(std::time::Duration::from_secs(60)),
+            &processes,
+            "/tmp/harbor-mcp-bridge",
+            "http://127.0.0.1:7777/mcp",
+        );
+        let _ = std::fs::remove_file(config);
+        assert!(!state.bridge_running);
+        assert!(state.restart_required);
+        assert!(state.error.is_none());
+    }
 
     #[test]
     fn claude_code_args_keep_name_before_options_and_command_separator() {

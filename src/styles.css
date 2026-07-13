@@ -2049,9 +2049,21 @@ span.server-port {
   font-size: var(--type-caption);
   font-weight: 600;
 }
-.connections-card-status[data-tone="connected"] {
+.connections-card-status[data-tone="running"] {
   color: var(--ok);
   background: var(--ok-soft);
+}
+.connections-card-status[data-tone="configured"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.connections-card-status[data-tone="restart"] {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+.connections-card-status[data-tone="error"] {
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 .connections-card-status[data-tone="available"] {
   color: var(--accent);

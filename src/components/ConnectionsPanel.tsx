@@ -9,7 +9,7 @@ import {
   InfoCircledIcon,
 } from "@radix-ui/react-icons";
 import { api } from "../api";
-import type { AgentStatus, McpInfo } from "../types";
+import type { AgentConnection, AgentStatus, McpInfo } from "../types";
 
 type AgentKind = "code" | "desktop" | "codex";
 
@@ -58,10 +58,12 @@ function ConnectCard({
   kind,
   title,
   subtitle,
-  connected,
+  connection,
   available,
   unavailableNote,
-  connectedHint,
+  runningHint,
+  configuredHint,
+  restartHint,
   connectLabel,
   busy,
   onConnect,
@@ -70,22 +72,44 @@ function ConnectCard({
   kind: AgentKind;
   title: string;
   subtitle: string;
-  connected: boolean;
+  connection: AgentConnection;
   available: boolean;
   unavailableNote: string;
-  connectedHint: string;
+  runningHint: string;
+  configuredHint: string;
+  restartHint: string;
   connectLabel: string;
   busy: boolean;
   onConnect: () => void;
   fallback: ReactNode;
 }) {
   const subtitleId = `connections-${kind}-description`;
+  const state = connection.error
+    ? "error"
+    : connection.restartRequired
+      ? "restart"
+      : connection.bridgeRunning
+        ? "running"
+        : connection.configured
+          ? "configured"
+          : available
+            ? "available"
+            : "unavailable";
+  const hint = connection.error
+    ? connection.error
+    : connection.restartRequired
+      ? restartHint
+      : connection.bridgeRunning
+        ? runningHint
+        : connection.configured
+          ? configuredHint
+          : subtitle;
 
   return (
     <article
       className="connections-card"
       data-agent={kind}
-      data-connected={connected || undefined}
+      data-state={state}
       data-available={available || undefined}
       aria-labelledby={`connections-${kind}-title`}
       aria-describedby={subtitleId}
@@ -103,16 +127,31 @@ function ConnectCard({
             {title}
           </h3>
           <p className="connections-card-subtitle" id={subtitleId}>
-            {connected ? connectedHint : subtitle}
+            {hint}
           </p>
         </div>
       </div>
 
       <div className="connections-card-status-row">
-        {connected ? (
-          <span className="connections-card-status" data-tone="connected">
+        {state === "running" ? (
+          <span className="connections-card-status" data-tone="running">
             <CheckCircledIcon aria-hidden />
-            Connected
+            Bridge running
+          </span>
+        ) : state === "configured" ? (
+          <span className="connections-card-status" data-tone="configured">
+            <span className="connections-status-dot" aria-hidden />
+            Configured
+          </span>
+        ) : state === "restart" ? (
+          <span className="connections-card-status" data-tone="restart">
+            <span className="connections-status-dot" aria-hidden />
+            Restart required
+          </span>
+        ) : state === "error" ? (
+          <span className="connections-card-status" data-tone="error">
+            <InfoCircledIcon aria-hidden />
+            Bridge not running
           </span>
         ) : available ? (
           <span className="connections-card-status" data-tone="available">
@@ -127,12 +166,12 @@ function ConnectCard({
         )}
       </div>
 
-      {!connected && !available && (
+      {!connection.configured && !available && (
         <div className="connections-card-fallback">{fallback}</div>
       )}
 
       <div className="connections-card-action">
-        {connected ? (
+        {connection.configured ? (
           <Button
             className="connections-action-button"
             size="2"
@@ -140,10 +179,14 @@ function ConnectCard({
             color="gray"
             disabled={busy}
             onClick={onConnect}
-            aria-label={`Update ${title} connection`}
+            aria-label={`Update ${title} configuration`}
           >
             {busy ? <Spinner size="1" /> : null}
-            {busy ? "Updating…" : "Update connection"}
+            {busy
+              ? "Updating…"
+              : connection.error
+                ? "Repair configuration"
+                : "Update configuration"}
           </Button>
         ) : available ? (
           <Button
@@ -165,7 +208,7 @@ function ConnectCard({
 export function ConnectionsPanel({
   onAgentsChanged,
 }: {
-  onAgentsChanged?: () => void;
+  onAgentsChanged?: (status: AgentStatus) => void;
 }) {
   const [info, setInfo] = useState<McpInfo | null>(null);
   const [status, setStatus] = useState<AgentStatus | null>(null);
@@ -176,17 +219,19 @@ export function ConnectionsPanel({
   const [statusLoading, setStatusLoading] = useState(true);
   const [statusError, setStatusError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    setStatusLoading(true);
+  const refresh = useCallback(async (showLoading = true) => {
+    if (showLoading) setStatusLoading(true);
     try {
-      setStatus(await api.agentsStatus());
+      const next = await api.agentsStatus();
+      setStatus(next);
+      onAgentsChanged?.(next);
       setStatusError(null);
     } catch (e) {
       setStatusError(String(e));
     } finally {
-      setStatusLoading(false);
+      if (showLoading) setStatusLoading(false);
     }
-  }, []);
+  }, [onAgentsChanged]);
 
   const refreshInfo = useCallback(async () => {
     try {
@@ -198,10 +243,14 @@ export function ConnectionsPanel({
   }, []);
 
   useEffect(() => {
-    refreshInfo();
-    refresh();
-    const timer = window.setInterval(refreshInfo, 5_000);
-    return () => window.clearInterval(timer);
+    void refreshInfo();
+    void refresh();
+    const infoTimer = window.setInterval(refreshInfo, 5_000);
+    const statusTimer = window.setInterval(() => void refresh(false), 7_500);
+    return () => {
+      window.clearInterval(infoTimer);
+      window.clearInterval(statusTimer);
+    };
   }, [refresh, refreshInfo]);
 
   async function connect(which: AgentKind) {
@@ -215,8 +264,7 @@ export function ConnectionsPanel({
             ? await api.connectClaudeDesktop()
             : await api.connectCodex();
       setMsg({ ok: true, text });
-      await refresh();
-      onAgentsChanged?.();
+      await refresh(false);
     } catch (e) {
       setMsg({ ok: false, text: String(e) });
     } finally {
@@ -330,7 +378,11 @@ export function ConnectionsPanel({
               </Callout.Icon>
               <Callout.Text>
                 Could not inspect installed AI clients. {statusError}{" "}
-                <Button size="1" variant="ghost" onClick={refresh}>
+                <Button
+                  size="1"
+                  variant="ghost"
+                  onClick={() => void refresh()}
+                >
                   Retry
                 </Button>
               </Callout.Text>
@@ -368,10 +420,16 @@ export function ConnectionsPanel({
                 kind="code"
                 title="Claude Code"
                 subtitle="Connect the Claude CLI at user scope."
-                connected={status.codeConnected}
+                connection={status.code}
                 available={status.codeCli}
                 unavailableNote="CLI not found"
-                connectedHint="Connected. Run /mcp in Claude Code to use Harbor."
+                runningHint="Claude Code launched Harbor's bridge. Run /mcp to verify its tool catalog."
+                configuredHint={
+                  "Configuration saved. Start a new Claude Code session to launch Harbor."
+                }
+                restartHint={
+                  "Start a new Claude Code session to launch the updated bridge."
+                }
                 connectLabel="Connect Claude Code"
                 busy={busy === "code"}
                 onConnect={() => connect("code")}
@@ -394,10 +452,14 @@ export function ConnectionsPanel({
                 kind="desktop"
                 title="Claude Desktop"
                 subtitle="Add Harbor to the Claude Desktop app."
-                connected={status.desktopConnected}
+                connection={status.desktop}
                 available={status.desktopInstalled}
                 unavailableNote="App not detected"
-                connectedHint="Connected. Restart Claude Desktop to use Harbor."
+                runningHint="Claude Desktop launched Harbor's MCP bridge."
+                configuredHint={
+                  "Configuration saved. Open Claude Desktop to launch Harbor."
+                }
+                restartHint="Fully quit and reopen Claude Desktop to launch Harbor."
                 connectLabel="Connect Desktop"
                 busy={busy === "desktop"}
                 onConnect={() => connect("desktop")}
@@ -420,10 +482,14 @@ export function ConnectionsPanel({
                 kind="codex"
                 title="Codex"
                 subtitle="Connect Harbor through your Codex config."
-                connected={status.codexConnected}
+                connection={status.codex}
                 available={status.codexInstalled}
                 unavailableNote="App not detected"
-                connectedHint="Connected. Restart Codex to use Harbor."
+                runningHint="A running Codex session launched Harbor's MCP bridge."
+                configuredHint={
+                  "Configuration saved. Start a new Codex session to launch Harbor."
+                }
+                restartHint="Restart Codex or start a new session to launch Harbor."
                 connectLabel="Connect Codex"
                 busy={busy === "codex"}
                 onConnect={() => connect("codex")}

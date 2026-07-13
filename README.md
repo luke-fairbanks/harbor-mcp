@@ -129,7 +129,10 @@ host process.
 Open **AI connections** and choose **Connect Claude Code**, **Connect Desktop**,
 or **Connect Codex**. The guided setup installs a restart-safe, owner-only
 launcher that follows Harbor’s live endpoint and can quietly open Harbor after
-a reboot.
+a reboot. Fully quit and reopen an already-running client after connecting it.
+Harbor distinguishes a saved configuration from an observed **Bridge running**
+process; the latter means the client launched Harbor, while the client's own MCP
+tool list is the final confirmation that it accepted the catalog.
 
 The launcher currently requires Node.js/npx and may download the pinned
 `mcp-remote@0.1.38` adapter the first time it runs. A bundled bridge that removes
@@ -194,6 +197,18 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+When changing MCP schemas, transport, authentication, or the desktop launcher,
+start the patched Harbor build after using one-click setup at least once, then
+exercise the exact installed Claude/Codex bridge for 90 seconds:
+
+```bash
+node scripts/mcp-bridge-soak.mjs --duration-ms 90000 --interval-ms 30000
+```
+
+The harness performs Claude-compatible initialization, validates all advertised
+tool schemas, and repeatedly calls the read-only `list_apps` tool. It must end
+with `PASS` and no schema, authentication, SSE, or reconnect errors.
 
 See [DESIGN.md](./DESIGN.md) for the shipped architecture,
 [ROADMAP.md](./ROADMAP.md) for planned work, and

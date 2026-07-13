@@ -87,6 +87,7 @@ jobs:
         run: |
           npm test
           npm run build
+          node --check scripts/mcp-bridge-soak.mjs
 
       - name: Verify Retina DMG background
         run: |

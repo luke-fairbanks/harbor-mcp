@@ -112,11 +112,18 @@ export interface Detection {
 
 export interface AgentStatus {
   codeCli: boolean;
-  codeConnected: boolean;
+  code: AgentConnection;
   desktopInstalled: boolean;
-  desktopConnected: boolean;
+  desktop: AgentConnection;
   codexInstalled: boolean;
-  codexConnected: boolean;
+  codex: AgentConnection;
+}
+
+export interface AgentConnection {
+  configured: boolean;
+  bridgeRunning: boolean;
+  restartRequired: boolean;
+  error: string | null;
 }
 
 export interface FixResult {

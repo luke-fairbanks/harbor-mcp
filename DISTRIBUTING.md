@@ -459,8 +459,11 @@ configuration advertise it, eliminating the old port check/bind race.
   instead of allowing two processes to race the endpoint descriptor.
 - App data is `0700`; `mcp.json`, registry/run state, agent configs, and Harbor's
   safety backups are written atomically as `0600`.
-- Client status is based on the current URL/token or launcher descriptor, not
-  merely the presence of an entry named `harbor`.
+- AI connections recognizes Harbor's current managed launcher configuration,
+  not merely an entry named `harbor`. It reports configuration separately from
+  an observed **Bridge running** process and flags clients that predate the
+  current config or per-launch endpoint descriptor. A bridge process alone does
+  not claim that the host accepted every tool schema.
 
 The current restart-safe bridge used by Claude Code, Claude Desktop, and Codex
 still needs Node/npx and may need network on its first run. Manual native HTTP
@@ -468,3 +471,17 @@ configuration avoids that dependency but requires Harbor to be open and the
 client entry to match its current port. A future fully offline release should
 replace the bridge with a signed Rust stdio sidecar bundled inside `Harbor.app`;
 see `ROADMAP.md`.
+
+For any release that changes MCP schemas, transport, authentication, or the
+launcher, run the release candidate with one-click client setup already present,
+fully restart Claude Desktop or start a fresh Codex session, and execute:
+
+```bash
+node scripts/mcp-bridge-soak.mjs --duration-ms 90000 --interval-ms 30000
+```
+
+The harness uses the exact installed stdio launcher, validates the complete tool
+catalog against Claude Desktop's object-schema requirement, and calls the
+read-only `list_apps` tool immediately and after 30, 60, and 90 seconds. Do not
+publish unless it ends with `PASS` and emits no schema, authentication, SSE, or
+reconnect errors.

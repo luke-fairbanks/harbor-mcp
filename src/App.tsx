@@ -217,12 +217,12 @@ export default function App() {
 
   const selectedItem = items.find((i) => i.config.name === selected) ?? null;
 
-  const connectedNames = [
-    agents?.codeConnected ? "Claude Code" : null,
-    agents?.desktopConnected ? "Claude Desktop" : null,
-    agents?.codexConnected ? "Codex" : null,
+  const runningBridgeNames = [
+    agents?.code.bridgeRunning ? "Claude Code" : null,
+    agents?.desktop.bridgeRunning ? "Claude Desktop" : null,
+    agents?.codex.bridgeRunning ? "Codex" : null,
   ].filter(Boolean) as string[];
-  const agentsConnected = connectedNames.length > 0;
+  const hasRunningBridges = runningBridgeNames.length > 0;
   const runningCount = items.filter(
     (item) => live[item.config.name]?.running ?? item.running,
   ).length;
@@ -351,8 +351,8 @@ export default function App() {
           >
             <Link2Icon />
             <span>AI connections</span>
-            {agentsConnected && (
-              <span className="sidebar-nav-badge">{connectedNames.length}</span>
+            {hasRunningBridges && (
+              <span className="sidebar-nav-badge">{runningBridgeNames.length}</span>
             )}
           </button>
         </nav>
@@ -460,7 +460,7 @@ export default function App() {
               onAddProject={() => setRegisterOpen(true)}
             />
           ) : view === "connections" ? (
-            <ConnectionsPanel onAgentsChanged={refreshAgents} />
+            <ConnectionsPanel onAgentsChanged={setAgents} />
           ) : view === "settings" ? (
             <AppSettingsPanel updater={updater} />
           ) : view === "servers" ? (

@@ -20,7 +20,7 @@ use axum::{
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::transport::{
-    streamable_http_server::{session::local::LocalSessionManager, tower::StreamableHttpService},
+    streamable_http_server::{session::never::NeverSessionManager, tower::StreamableHttpService},
     StreamableHttpServerConfig,
 };
 use rmcp::{Json, ServerHandler};
@@ -84,12 +84,38 @@ struct StopLocalArg {
 /// root to be type `"object"`; a bare `serde_json::Value` schema is `"any"` and
 /// is rejected at runtime. Wrapping the payload under `result` guarantees a
 /// valid object root for every tool.
-#[derive(serde::Serialize, JsonSchema)]
+#[derive(serde::Serialize)]
 struct JsonOut {
     result: Value,
 }
 
+impl JsonSchema for JsonOut {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "HarborToolResult".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // `serde_json::Value` normally generates the boolean JSON Schema
+        // `true`. Although valid JSON Schema, Claude Desktop's MCP validator
+        // requires every property schema to be an object and discards the
+        // entire tool catalog when it encounters that boolean. Every Harbor
+        // tool returns an object under `result`, so describe that contract
+        // explicitly instead of advertising an unconstrained value.
+        schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                "result": {
+                    "type": "object",
+                    "description": "Harbor tool result"
+                }
+            },
+            "required": ["result"]
+        })
+    }
+}
+
 fn out(v: Value) -> Json<JsonOut> {
+    debug_assert!(v.is_object(), "Harbor tool results must be JSON objects");
     Json(JsonOut { result: v })
 }
 
@@ -458,21 +484,26 @@ async fn auth_mw(
 
 // ---- router + serve -------------------------------------------------------
 
+fn transport_config() -> StreamableHttpServerConfig {
+    StreamableHttpServerConfig::default()
+        // Harbor's handlers keep all durable state in AppState, not in the MCP
+        // session. Stateless JSON avoids handing bridge clients a session ID
+        // that makes them open and indefinitely reconnect a secondary SSE GET.
+        .with_stateful_mode(false)
+        .with_json_response(true)
+        .with_allowed_origins(["http://localhost", "http://127.0.0.1", "http://[::1]"])
+}
+
 /// Build the axum router: bearer authentication protects both `/health` and
 /// `/mcp`, so a process merely occupying the remembered port cannot impersonate
 /// Harbor's readiness route.
 pub fn build_router(state: Arc<AppState>, token: String) -> Router {
     let factory_state = state.clone();
-    let transport_config = StreamableHttpServerConfig::default().with_allowed_origins([
-        "http://localhost",
-        "http://127.0.0.1",
-        "http://[::1]",
-    ]);
-    let mcp_service: StreamableHttpService<HarborMcp, LocalSessionManager> =
+    let mcp_service: StreamableHttpService<HarborMcp, NeverSessionManager> =
         StreamableHttpService::new(
             move || Ok(HarborMcp::new(factory_state.clone())),
-            LocalSessionManager::default().into(),
-            transport_config,
+            NeverSessionManager::default().into(),
+            transport_config(),
         );
 
     let protected = Router::new()
@@ -522,6 +553,72 @@ pub fn bind_listener(preferred: u16) -> Result<(u16, std::net::TcpListener)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::{header, Method};
+
+    #[derive(Clone)]
+    struct LifecycleTestMcp;
+
+    impl ServerHandler for LifecycleTestMcp {
+        fn get_info(&self) -> rmcp::model::ServerInfo {
+            use rmcp::model::*;
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+                .with_server_info(Implementation::new("harbor-lifecycle-test", "1"))
+        }
+    }
+
+    fn lifecycle_test_service() -> StreamableHttpService<LifecycleTestMcp, NeverSessionManager> {
+        StreamableHttpService::new(
+            || Ok(LifecycleTestMcp),
+            NeverSessionManager::default().into(),
+            transport_config(),
+        )
+    }
+
+    fn mcp_post(message: Value) -> Request {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header(header::HOST, "127.0.0.1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2025-11-25")
+            .body(Body::from(serde_json::to_vec(&message).unwrap()))
+            .unwrap()
+    }
+
+    async fn assert_json_result(response: axum::response::Response, expected_id: u64) -> Value {
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        assert!(response.headers().get("mcp-session-id").is_none());
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["id"], expected_id);
+        assert!(
+            value.get("result").is_some(),
+            "unexpected MCP body: {value}"
+        );
+        value
+    }
+
+    fn initialize(id: u64) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "harbor-test", "version": "1" }
+            }
+        })
+    }
 
     #[test]
     fn binding_retains_the_selected_socket_and_skips_busy_port() {
@@ -550,5 +647,185 @@ mod tests {
         assert_eq!(bearer(&headers), Some("secret-token"));
         headers.insert(AUTHORIZATION, "Basic secret-token".parse().unwrap());
         assert_eq!(bearer(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn stateless_json_transport_does_not_create_an_sse_session() {
+        let service = lifecycle_test_service();
+        let response = service.handle(mcp_post(initialize(1))).await;
+        assert_json_result(response.map(Body::new), 1).await;
+
+        let initialized = service
+            .handle(mcp_post(json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            })))
+            .await;
+        assert_eq!(initialized.status(), StatusCode::ACCEPTED);
+        assert!(initialized.headers().get("mcp-session-id").is_none());
+
+        // mcp-remote performs this GET after its initialized notification. A
+        // 405 tells it that the server has no standalone SSE stream; because
+        // initialize returned no session ID, it does not enter reconnect mode.
+        let get = Request::builder()
+            .method(Method::GET)
+            .uri("/mcp")
+            .header(header::HOST, "127.0.0.1")
+            .header(header::ACCEPT, "text/event-stream")
+            .body(Body::empty())
+            .unwrap();
+        let response = service.handle(get).await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ALLOW)
+                .and_then(|value| value.to_str().ok()),
+            Some("POST")
+        );
+    }
+
+    #[tokio::test]
+    async fn stateless_json_transport_handles_repeated_fresh_requests() {
+        let service = lifecycle_test_service();
+
+        for round in 0..2 {
+            let initialize_id = 10 + round * 2;
+            assert_json_result(
+                service
+                    .handle(mcp_post(initialize(initialize_id)))
+                    .await
+                    .map(Body::new),
+                initialize_id,
+            )
+            .await;
+
+            let list_id = initialize_id + 1;
+            let result = assert_json_result(
+                service
+                    .handle(mcp_post(json!({
+                        "jsonrpc": "2.0",
+                        "id": list_id,
+                        "method": "tools/list",
+                        "params": {}
+                    })))
+                    .await
+                    .map(Body::new),
+                list_id,
+            )
+            .await;
+            assert_eq!(result["result"]["tools"], json!([]));
+        }
+    }
+
+    fn find_boolean_schema(value: &Value, path: &str) -> Option<String> {
+        if value.is_boolean() {
+            return Some(path.to_string());
+        }
+        let object = value.as_object()?;
+
+        // Only descend into keywords whose values are schemas. Boolean data
+        // such as `default: false` is not a boolean-form schema.
+        for key in [
+            "additionalItems",
+            "additionalProperties",
+            "contains",
+            "contentSchema",
+            "else",
+            "if",
+            "items",
+            "not",
+            "propertyNames",
+            "then",
+            "unevaluatedItems",
+            "unevaluatedProperties",
+        ] {
+            if let Some(child) = object.get(key) {
+                if let Some(items) = child.as_array() {
+                    for (index, item) in items.iter().enumerate() {
+                        if let Some(found) =
+                            find_boolean_schema(item, &format!("{path}.{key}[{index}]"))
+                        {
+                            return Some(found);
+                        }
+                    }
+                } else if let Some(found) = find_boolean_schema(child, &format!("{path}.{key}")) {
+                    return Some(found);
+                }
+            }
+        }
+
+        for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+            if let Some(children) = object.get(key).and_then(Value::as_array) {
+                for (index, child) in children.iter().enumerate() {
+                    if let Some(found) =
+                        find_boolean_schema(child, &format!("{path}.{key}[{index}]"))
+                    {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+
+        for key in [
+            "$defs",
+            "definitions",
+            "dependentSchemas",
+            "patternProperties",
+            "properties",
+        ] {
+            if let Some(children) = object.get(key).and_then(Value::as_object) {
+                for (name, child) in children {
+                    if let Some(found) = find_boolean_schema(child, &format!("{path}.{key}.{name}"))
+                    {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    #[test]
+    fn every_tool_schema_is_claude_compatible() {
+        let tools = HarborMcp::tool_router().list_all();
+        assert!(!tools.is_empty());
+
+        for tool in tools {
+            let input = Value::Object(tool.input_schema.as_ref().clone());
+            assert_eq!(
+                find_boolean_schema(&input, &format!("{}.inputSchema", tool.name)),
+                None,
+                "{} emitted a boolean-form input schema",
+                tool.name
+            );
+
+            let output = tool
+                .output_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} is missing outputSchema", tool.name));
+            let output_value = Value::Object(output.as_ref().clone());
+            assert_eq!(
+                find_boolean_schema(&output_value, &format!("{}.outputSchema", tool.name)),
+                None,
+                "{} emitted a boolean-form output schema",
+                tool.name
+            );
+            let result_schema = output
+                .get("properties")
+                .and_then(Value::as_object)
+                .and_then(|properties| properties.get("result"))
+                .unwrap_or_else(|| {
+                    panic!("{} is missing outputSchema.properties.result", tool.name)
+                });
+
+            assert!(
+                result_schema.is_object(),
+                "{} emitted a boolean property schema: {result_schema}",
+                tool.name
+            );
+            assert_eq!(result_schema["type"], "object", "tool: {}", tool.name);
+        }
     }
 }

@@ -110,7 +110,8 @@ processes.
 
 The MCP server runs in-process on Tauri's Tokio runtime and shares
 `Arc<AppState>` with the supervisor. It uses `rmcp` Streamable HTTP nested at
-`/mcp` in an `axum` router.
+`/mcp` in an `axum` router. Requests are stateless and return JSON responses;
+Harbor does not issue an MCP session ID or expose a standalone SSE stream.
 
 - Harbor reserves the loopback socket during startup, preferring port `7777`
   and scanning upward if necessary, before publishing connection details.
@@ -124,6 +125,14 @@ The MCP server runs in-process on Tauri's Tokio runtime and shares
 - The restart-safe launcher currently requires Node.js/npx and may need network
   access on first use. Advanced users can connect directly with native HTTP,
   but that configuration is tied to the current launch's port and token.
+- Every tool advertises object-form input and output schemas. In particular,
+  the uniform `result` output is an object schema rather than JSON Schema's
+  boolean `true` form, which some desktop MCP hosts reject even though it is
+  valid JSON Schema.
+- The AI connections UI reports managed launcher configuration separately from
+  an observed **Bridge running** process. Process observation cannot prove a
+  host accepted the tool catalog, so client compatibility is verified with a
+  real host restart plus `scripts/mcp-bridge-soak.mjs`.
 
 ### 3.3 Web UI and menu bar
 
@@ -437,4 +446,11 @@ npm run build
 )
 
 git diff --check
+```
+
+For MCP-facing changes, run the patched app with an existing one-click client
+configuration and add this live bridge check:
+
+```bash
+node scripts/mcp-bridge-soak.mjs --duration-ms 90000 --interval-ms 30000
 ```
