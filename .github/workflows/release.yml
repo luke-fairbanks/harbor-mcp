@@ -162,11 +162,19 @@ jobs:
           delimiter="HARBOR_NOTES_$(uuidgen)"
           {
             echo "body<<$delimiter"
+            echo '**Know what’s running. Stop the port chaos.**'
+            echo
+            echo 'Harbor is a Mac control center for understanding local servers, starting complete projects, and giving Claude or Codex a shared source of truth through MCP.'
+            echo
             printf '%s\n' "$notes"
             echo
-            echo "Universal macOS build for Intel and Apple Silicon."
+            echo '## Install'
             echo
-            echo '**Install:** download the `.dmg`, open it, and drag Harbor to Applications.'
+            echo 'Download the universal `.dmg` below, open it, and drag Harbor to Applications.'
+            echo
+            echo '- macOS 11 Big Sur or later'
+            echo '- Apple Silicon and Intel'
+            echo '- signed and notarized'
             echo "$delimiter"
           } >> "$GITHUB_OUTPUT"
 

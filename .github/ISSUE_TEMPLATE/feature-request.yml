@@ -1,0 +1,75 @@
+name: Feature request
+description: Suggest a focused improvement to Harbor's local development workflow.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the workflow problem. A proposed interface is welcome, but the outcome matters most.
+
+        > **Protect your privacy:** Do not post tokens, passwords, credentials, `.env` contents, or private filesystem paths. Redact usernames, project names, and identifying details from examples.
+  - type: input
+    id: harbor-version
+    attributes:
+      label: Harbor version
+      placeholder: "0.4.1"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "15.5"
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Mac architecture
+      options:
+        - Apple silicon
+        - Intel
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Product area
+      options:
+        - Overview and project orchestration
+        - Project detection and setup
+        - Local server inventory and cleanup
+        - AI connections and MCP
+        - Installation and updates
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the current workflow, how often it occurs, and where it becomes difficult.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What outcome would be useful?
+      description: Explain what success looks like. Include a proposed interaction if you have one.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do today?
+      description: Optional. Share workarounds or alternatives without exposing project details.
+  - type: checkboxes
+    id: privacy-check
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed tokens, credentials, `.env` contents, and private filesystem paths from this request.
+          required: true

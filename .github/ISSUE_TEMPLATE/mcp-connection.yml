@@ -1,0 +1,103 @@
+name: AI or MCP connection problem
+description: Report trouble connecting Claude, Codex, or another MCP client to Harbor.
+title: "[MCP connection]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Connection details can contain sensitive values. A small sanitized excerpt is enough.
+
+        > **Protect your privacy:** Do not post tokens, passwords, credentials, `.env` contents, or private filesystem paths. Never paste the full fallback command or connection config; it can contain Harbor's bearer token.
+  - type: input
+    id: harbor-version
+    attributes:
+      label: Harbor version
+      placeholder: "0.4.1"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "15.5"
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Mac architecture
+      options:
+        - Apple silicon
+        - Intel
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: AI client
+      options:
+        - Codex
+        - Claude Desktop
+        - Claude Code
+        - Other MCP client
+    validations:
+      required: true
+  - type: dropdown
+    id: connection-method
+    attributes:
+      label: Connection method
+      options:
+        - Connect button in Harbor
+        - Manual MCP configuration
+        - Existing connection stopped working
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: client-version
+    attributes:
+      label: AI client version
+      placeholder: Version number or build
+    validations:
+      required: true
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js and npx versions
+      description: Run `node --version` and `npx --version`, or write "not installed."
+      placeholder: node v24.3.0; npx 11.4.2
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the connection state and include only sanitized error text.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open AI connections
+        2. Choose ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: sanitized-config
+    attributes:
+      label: Sanitized configuration or logs
+      description: Optional. Replace tokens, usernames, project names, and paths with placeholders before pasting a short excerpt.
+      render: shell
+  - type: checkboxes
+    id: privacy-check
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed tokens, credentials, `.env` contents, private URLs, and private filesystem paths from this report.
+          required: true

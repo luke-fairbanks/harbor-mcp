@@ -1,0 +1,83 @@
+name: Installation or update problem
+description: Report trouble installing, launching, or updating Harbor.
+title: "[Install/update]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Harbor's release experience.
+
+        > **Protect your privacy:** Do not post tokens, passwords, credentials, `.env` contents, or private filesystem paths. Redact usernames, project names, and other identifying details from messages and logs.
+  - type: input
+    id: harbor-version
+    attributes:
+      label: Harbor version
+      description: Use the installed version or the version you are trying to install.
+      placeholder: "0.4.1"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "15.5"
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Mac architecture
+      options:
+        - Apple silicon
+        - Intel
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Installation method
+      options:
+        - Downloaded DMG from GitHub Releases
+        - Homebrew
+        - Automatic update inside Harbor
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the exact sanitized error message and the step where the problem occurred.
+      placeholder: Harbor checked for an update, then...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Harbor
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional sanitized context
+      description: Optional screenshots or short log excerpts are useful after private paths and identifying details are removed.
+  - type: checkboxes
+    id: privacy-check
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed tokens, credentials, `.env` contents, and private filesystem paths from this report.
+          required: true

@@ -35,7 +35,8 @@ Harbor never installs an update silently:
   production build and will check the configured public feed when launched.
 
 > Harbor v0.3.0 and earlier do not contain the updater. Those users must install
-> v0.4.0 manually once. Every signed release after that can update in-app.
+> the current release (v0.4.0 or later) manually once. Every signed release after
+> that can update in-app.
 
 ---
 

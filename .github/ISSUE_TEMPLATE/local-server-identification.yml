@@ -1,0 +1,97 @@
+name: Local server identification problem
+description: Report a missing, misidentified, mismatched, or duplicate local listener.
+title: "[Local server]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Harbor's Local servers view can show commands and working directories. Sanitize them before sharing.
+
+        > **Protect your privacy:** Do not post tokens, passwords, credentials, `.env` contents, or private filesystem paths. Replace usernames, project names, hostnames, and private ports when they are not essential.
+  - type: input
+    id: harbor-version
+    attributes:
+      label: Harbor version
+      placeholder: "0.4.1"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "15.5"
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Mac architecture
+      options:
+        - Apple silicon
+        - Intel
+        - Not sure
+    validations:
+      required: true
+  - type: checkboxes
+    id: problem-kind
+    attributes:
+      label: What looks wrong?
+      options:
+        - label: A running server is missing
+        - label: The process or framework is misidentified
+        - label: A project match is missing or incorrect
+        - label: Duplicate processes are grouped or flagged incorrectly
+        - label: Open, Add to Harbor, or Stop behaves unexpectedly
+    validations:
+      required: true
+  - type: input
+    id: server-kind
+    attributes:
+      label: Server or process type
+      description: Share the framework/runtime and version if known. Use a substitute port when the real port is private.
+      placeholder: Next.js 15 on port 3000
+    validations:
+      required: true
+  - type: textarea
+    id: sanitized-process
+    attributes:
+      label: Sanitized process details
+      description: Include only the useful command, parent process, bind address, and working-directory shape. Replace private values with placeholders.
+      placeholder: |
+        Command: node <PROJECT>/server.js
+        Parent: npm
+        Bind: 127.0.0.1:<PORT>
+        Working directory: <HOME>/<PROJECT>
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What did Harbor show or do?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should Harbor have shown or done?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start the sanitized server above
+        2. Open Local servers
+        3. ...
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy-check
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed tokens, credentials, `.env` contents, and private filesystem paths from this report.
+          required: true

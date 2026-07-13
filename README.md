@@ -1,109 +1,144 @@
 <div align="center">
 
-<img src="assets/banner.png" alt="Harbor — boot every local dev server with one button; smart ports, crash recovery, MCP-native" width="820" />
-
-</div>
+<img src="assets/icon-preview.png" alt="Harbor app icon" width="104" />
 
 # Harbor
 
-A polished, native macOS app that boots all the local servers a project needs
-with **one button** — with intelligent port allocation, crash recovery, and an
-**MCP server** baked in so your Claude (or Codex) can discover, configure, and
-drive your dev environment without you editing a single config file.
+**Know what’s running. Stop the port chaos.**
 
-Local process managers exist (foreman, pm2, Tilt, Herd). **None are MCP-native.**
-That's Harbor's point: register a project once, and from then on an AI agent can
-detect what it needs, write the run config, start/stop everything with automatic
-port allocation, watch resource usage, and read logs to debug.
+Harbor makes local servers on your Mac understandable—what is running, where it
+came from, and which copies look duplicated. Start a whole project in one click,
+or let Claude or Codex inspect and operate projects you have approved.
 
-> Stack: **Tauri 2** (Rust core + React 19 / Radix Themes UI). macOS only for now.
-> See [`DESIGN.md`](./DESIGN.md) for the architecture and
-> [`ROADMAP.md`](./ROADMAP.md) for the prioritized product path.
+[**Download Harbor**](https://github.com/luke-fairbanks/harbor-mcp/releases/latest) ·
+[Quick start](#quick-start) · [Connect an AI agent](#connect-claude-or-codex)
 
-> **Note:** unrelated to the [CNCF Harbor](https://goharbor.io) container registry.
+macOS 11+ · Apple Silicon + Intel · Signed and notarized · No account · MIT
 
-## Features
+</div>
 
-- **One-button start** with a topo-sorted dependency order and live log streaming.
-- **Port intelligence** — preferred → next-free allocation probed on **both** IPv4
-  and IPv6, with `${PORT}` / `${services.X.port}` placeholders resolved so a
-  frontend automatically targets whatever port the backend actually got. Recognizes
-  a command that pins its own port (e.g. `next dev -p 3002`) and never bumps it.
-- **Local servers inventory** — one live view of every local dev server and
-  infrastructure listener owned by your macOS user, including its URL, port,
-  PID, command, working folder, HTTP status/title, and likely framework. Harbor
-  maps strong matches to registered apps, flags probable duplicate project runs
-  and network-visible binds, and keeps unknown listeners visible.
-- **Detects already-running servers before allocating** — re-adopts processes a
-  previous Harbor session left running and recognizes a matching external server
-  on a service's preferred port *before* deciding to bump the port. A server that
-  shares a terminal, IDE, Claude, or Codex process group remains monitor-only and
-  blocks a duplicate launch; Harbor will not take down the host process.
-- **Identity-safe cleanup** — isolated, untracked servers can be stopped from the
-  inventory after confirmation. PID + process start time are rechecked immediately
-  before signalling; shells, terminals, IDEs, agents, and Harbor itself are refused.
-- **Auto-restart on crash** (opt-in per app) with bounded backoff and a give-up
-  cap, plus native crash notifications — and it can tell a deliberate Stop apart
-  from a crash, so it never fights you.
-- **Live resource monitor** — CPU% and memory per service, summed over the whole
-  process group, in the card and the menu-bar popover.
-- **Menu-bar popover** to start/stop/open your servers without opening the window.
-- **Fix with AI** — surfaces a service's error and hands a tailored prompt to a
-  connected Claude/Codex (or runs it headless) to diagnose it.
-- **Smart onboarding** — drag a project folder onto the window and Harbor scans it
-  and proposes a config (Next/Vite/Remix/Nuxt/SvelteKit/Astro/Angular/CRA/Gatsby,
-  Django/FastAPI/Flask, Go, Rails, static sites; pnpm/yarn/bun aware).
-- **MCP-native** — an in-process Streamable-HTTP MCP server (bound to `127.0.0.1`,
-  per-launch bearer token) exposes discovery and the whole lifecycle. One-click
-  setup for Claude Code, Claude Desktop, and Codex uses a stable launcher that
-  follows Harbor's live port/token and can quietly open Harbor after a reboot.
-  Duplicate Harbor launches focus the existing instance instead of racing its
-  endpoint descriptor.
-- **Human approval for agent commands** — configs registered over MCP are saved as
-  pending. Harbor shows the exact app configuration and will not execute it until
-  a person approves it locally. MCP tools advertise read/write/destructive hints.
+> **Note:** Harbor is unrelated to the
+> [CNCF Harbor](https://goharbor.io) container registry.
+
+## Why Harbor
+
+### See the servers already running on your Mac
+
+Harbor inventories current-user TCP listeners and shows their port, process,
+command, working folder, HTTP response, and likely framework. Strong evidence
+maps servers to registered projects; probable duplicate project runs and
+network-visible binds are flagged while unknown listeners remain visible.
+
+### Start a project, not a pile of terminals
+
+Add a folder and review the services Harbor detects. It starts dependencies in
+order, streams logs, monitors health and resources, and resolves project ports.
+Before starting another copy, Harbor checks whether the project already has a
+matching server it can safely reuse.
+
+### Give coding agents the same source of truth
+
+Harbor exposes its live project and server state through a loopback-only MCP
+server. Claude and Codex can inspect local listeners, detect a project, read
+logs, and operate registered projects. A config created by an agent stays paused
+until you approve that exact config in Harbor.
 
 ## Install
 
-Download the **`.dmg`** from the
-[latest release](https://github.com/luke-fairbanks/harbor-mcp/releases), open it,
-and drag Harbor to Applications. Production releases are signed by Faba
-Development, notarized by Apple, and cryptographically verified by the release
-workflow. Starting with v0.4.0, Harbor checks for signed updates shortly after
-launch and every six hours. When an update is available, Harbor asks before it
-installs and relaunches; managed projects stay online while the desktop app
-restarts. You can also check anytime from **Settings → Harbor updates**.
+### Download the app
 
-Or with Homebrew:
+Download the **`.dmg`** from the
+[latest release](https://github.com/luke-fairbanks/harbor-mcp/releases/latest),
+open it, and drag Harbor to Applications.
+
+### Install with Homebrew
 
 ```bash
 brew install --cask luke-fairbanks/tap/harbor
 ```
 
-## Build it yourself
+Production releases are signed by Faba Development and notarized by Apple.
+Harbor supports macOS 11 Big Sur or later on Apple Silicon and Intel Macs.
 
-```bash
-npm install
-npm run tauri dev      # dev window + MCP server (prefers 127.0.0.1:7777)
-npm run tauri:build:local # produces a local .app / .dmg without updater artifacts
-```
+Starting with v0.4.0, Harbor checks for signed updates shortly after launch and
+every six hours. It always asks before installing. You can also check manually
+from **project settings → Harbor updates**. Managed project processes remain
+online while Harbor updates and relaunches.
 
-Maintainers: see [`DISTRIBUTING.md`](./DISTRIBUTING.md) for code signing,
-notarization, updater keys, and how to cut a release.
+## Quick start
 
-## Connect your Claude (or Codex)
+1. Open Harbor and choose **Add project**, or drag a project folder onto the
+   window.
+2. Review the detected services and commands, then choose **Add to Harbor**.
+3. Open the project and choose **Start project**.
+4. Open **Local servers** to see its ports alongside other listeners already
+   running under your macOS user.
 
-Open **Connect your AI agents** (gear, bottom-left) for restart-safe one-click
-setup (Claude Code, Claude Desktop, and Codex). For a manual native-HTTP setup,
-read the current port and token from
-`~/Library/Application Support/com.harbor.desktop/mcp.json`—the port can differ
-from 7777 when another process already owns it.
+Harbor recognizes common JavaScript frameworks and package managers, Django,
+FastAPI, Flask, Go, Rails, and static sites. If detection misses, you can import
+or edit a `harbor.json` configuration instead.
 
-The restart-safe launcher requires Node.js/npx and may fetch the pinned
-`mcp-remote@0.1.38` adapter on first use. If npx is unavailable, use the manual
-native-HTTP setup below, keep Harbor open while the client is running, and
-update the client entry after each Harbor restart because the token is
-session-scoped:
+## Conservative by design
+
+- **Observation is not ownership.** Matching a server to a project does not give
+  Harbor permission to stop it.
+- **Duplicate prevention favors certainty.** Harbor reuses a strongly matched
+  server; ambiguous matches block launch and ask you to inspect them.
+- **Cleanup is identity-protected.** Stop is offered only for isolated,
+  untracked servers. Harbor rechecks PID, process start time, and port before it
+  signals the process, and refuses terminals, IDEs, coding agents, and Harbor
+  itself. “Safe to stop” describes process isolation—not whether the process has
+  unsaved work.
+- **Agent-written commands require local approval.** Approval applies to the
+  exact registered config. Changing it through MCP requires a new approval.
+- **MCP stays local.** The server binds to `127.0.0.1` and uses a new bearer token
+  on every Harbor launch. Its descriptor and Harbor’s app-data directory are
+  owner-only on macOS.
+- **Fix with AI is explicit.** When you invoke it, Harbor passes the service
+  command, working path, exit state, and recent logs to your installed Codex or
+  Claude CLI. That data is then handled under the privacy terms of whichever
+  provider Harbor invokes.
+
+## What Harbor manages
+
+- Dependency-aware start, stop, restart, and one-click project launch
+- Preferred-to-next-free port allocation on IPv4 and IPv6
+- `${PORT}` and `${services.<name>.port}` rewiring between services
+- Recognition of commands that pin their own port
+- HTTP, TCP, log-pattern, and process-alive readiness checks
+- Live logs, CPU, and memory for each managed process group
+- Opt-in crash restart with bounded backoff
+- Re-adoption of verified Harbor processes that survive an app restart
+- A menu-bar popover for common project actions
+- Framework-aware project detection and editable `harbor.json` configs
+
+## Local server inventory
+
+The **Local servers** view scans TCP listeners owned by your current macOS user.
+It combines process, working-directory, command, port, and bounded HTTP evidence
+to classify each listener as unknown, matched, Harbor-managed, or eligible for
+identity-safe cleanup.
+
+Harbor can recognize a strongly matching server on a service’s preferred port
+before allocating another one. If that process shares a group with a terminal,
+IDE, Claude, or Codex, Harbor leaves it monitor-only and will not take down the
+host process.
+
+## Connect Claude or Codex
+
+Open **AI connections** and choose **Connect Claude Code**, **Connect Desktop**,
+or **Connect Codex**. The guided setup installs a restart-safe, owner-only
+launcher that follows Harbor’s live endpoint and can quietly open Harbor after
+a reboot.
+
+The launcher currently requires Node.js/npx and may download the pinned
+`mcp-remote@0.1.38` adapter the first time it runs. A bundled bridge that removes
+that dependency is on the [roadmap](./ROADMAP.md).
+
+Advanced users can connect directly over Streamable HTTP. Read the current port
+and token from
+`~/Library/Application Support/com.harbor.desktop/mcp.json`; the port can differ
+from 7777 and the token changes after every Harbor restart.
 
 ```bash
 SETTINGS="$HOME/Library/Application Support/com.harbor.desktop/mcp.json"
@@ -113,66 +148,67 @@ claude mcp add harbor --scope user --transport http "http://127.0.0.1:${PORT}/mc
   --header "Authorization: Bearer ${TOKEN}"
 ```
 
-Then ask your agent to run `list_local_servers` first. It can inspect what is
-already running, `detect_app` a new folder, register a proposed config for local
-approval, then use `start_app`, `app_status`, `get_logs`, and `stop_app`.
+Then try:
 
-## Concepts
+> What local servers are running, and do any look duplicated?
 
-- **App** — a registered project folder with a name, root, and services.
-- **Service** — one long-running process: `{ name, cwd, command, port?, env,
-  dependsOn[], healthCheck?, readyLogPattern? }`. `command`/`env` may contain
-  `${PORT}` and `${services.X.port}` placeholders.
-- **Profile** — a named service set (e.g. `default` = just the server, `dev` =
-  server + web).
-- **Port plan** — what each service preferred vs. the port it actually got, and
-  how dependents were rewired.
-
-## Tools
-
-The embedded MCP server exposes:
+### MCP tools
 
 | Tool | Purpose |
-|------|---------|
-| `list_apps` | Registered apps + current run status |
-| `app_status(app)` | Per-service state, resolved ports, the port plan |
-| `detect_app(path)` | Scan a folder, **propose** a config (does not save) |
-| `register_app(config)` | Add/replace an app as **approval required** |
-| `start_app(app, profile?)` / `stop_app(app)` / `restart_app(app, profile?)` | Lifecycle |
-| `get_logs(app, service, lines?)` | Tail captured logs |
-| `list_local_servers` | Inventory all local listeners, matches, and probable duplicates |
-| `stop_local_server(pid, port, startedAt)` | Identity-safe cleanup of an isolated untracked server |
-| `open_app(app)` | Open a running app's primary URL |
+|---|---|
+| `list_apps` | List registered projects and their current run status |
+| `app_status(app)` | Inspect services, resolved ports, and the port plan |
+| `detect_app(path)` | Scan a folder and propose a config without saving it |
+| `register_app(config)` | Add or replace a config as approval required |
+| `start_app(app, profile?)` | Start an approved project or profile |
+| `stop_app(app)` | Stop Harbor-managed services for a project |
+| `restart_app(app, profile?)` | Restart an approved project or profile |
+| `get_logs(app, service, lines?)` | Read recent captured logs |
+| `list_local_servers` | Inventory listeners, matches, and probable duplicates |
+| `stop_local_server(pid, port, startedAt)` | Request identity-safe cleanup of an isolated server |
+| `open_app(app)` | Open a running project’s primary URL |
 
-The server binds `127.0.0.1` only and requires a per-launch bearer token. Harbor
-stores its app-data directory as owner-only (`0700`) and credential/config files
-as owner-only (`0600`) on Unix.
+## Build from source
 
-## Module map (`src-tauri/src`)
-
-| File | Responsibility |
-|------|----------------|
-| `model.rs` | Config + run types (serde) |
-| `store.rs` | Flat-JSON registry, MCP settings, and the `runs.json` adoption record |
-| `state.rs` | `AppState` shared by commands and the MCP server |
-| `supervisor.rs` | Spawn in process groups, stream logs, health/ready, adoption, auto-restart, resource sampling, clean kill |
-| `ports.rs` | Topo sort, dual-stack allocation, pinned-port detection, `${...}` resolution (unit-tested) |
-| `health.rs` | TCP/HTTP readiness probes |
-| `detect.rs` | `detect_app` framework heuristics (unit-tested) |
-| `discovery.rs` | User-wide listener inventory, project matching, HTTP hints, duplicate grouping, identity-safe cleanup |
-| `ops.rs` | Shared start/stop/restart/open logic (commands + MCP) |
-| `commands.rs` | Tauri command surface |
-| `mcp.rs` | axum + `rmcp` Streamable-HTTP server, bearer auth |
-| `lib.rs` | Wires it together; hosts the MCP server on Tauri's runtime |
-
-## Contributing
-
-Issues and PRs welcome. The Rust core has unit + integration tests:
+Harbor uses Tauri 2 with a Rust core and a React 19 / Radix Themes interface.
 
 ```bash
-cd src-tauri && cargo test
-npx tsc --noEmit   # from the repo root, typecheck the UI
+npm install
+npm run tauri dev
 ```
+
+Run the local production build without updater artifacts:
+
+```bash
+npm run tauri:build:local
+```
+
+### Verify changes
+
+```bash
+npm test
+npm run build
+
+cd src-tauri
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
+
+See [DESIGN.md](./DESIGN.md) for the shipped architecture,
+[ROADMAP.md](./ROADMAP.md) for planned work, and
+[DISTRIBUTING.md](./DISTRIBUTING.md) for the signed release process.
+
+## Feedback and contributing
+
+Found a listener Harbor misidentified, a project it could not detect, or an MCP
+client that would not connect? [Open a guided issue](https://github.com/luke-fairbanks/harbor-mcp/issues/new/choose).
+Please remove tokens, credentials, `.env` contents, and private paths before
+posting logs or commands.
+
+Issues and pull requests are welcome. Security vulnerabilities should be
+reported privately through
+[GitHub’s security advisory form](https://github.com/luke-fairbanks/harbor-mcp/security/advisories/new).
 
 ## License
 
