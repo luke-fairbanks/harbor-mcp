@@ -4,7 +4,7 @@
 > one place to understand what is running, prevent accidental duplicates, and
 > safely operate a project's local services.
 
-This document describes the architecture shipped in **Harbor v0.4.1**. Product
+This document describes the architecture shipped in **Harbor v0.4.2**. Product
 priorities that are not implemented yet belong in [`ROADMAP.md`](./ROADMAP.md),
 and the signed release procedure belongs in
 [`DISTRIBUTING.md`](./DISTRIBUTING.md).
@@ -221,7 +221,7 @@ removed from exported `harbor.json` files.
 
 ## 6. MCP tool surface and approval flow
 
-The v0.4.1 MCP server exposes these tools:
+The v0.4.2 MCP server exposes these tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -277,7 +277,7 @@ cleaned through `stop_local_server` when the inventory explicitly reports
 - Network-visible binds are labeled as warnings; Harbor does not interpret that
   label as a firewall or exposure guarantee.
 - Service environment values are currently stored in the protected JSON
-  registry. v0.4.1 does not yet move secrets into Keychain; that work is tracked
+  registry. v0.4.2 does not yet move secrets into Keychain; that work is tracked
   in [`ROADMAP.md`](./ROADMAP.md).
 
 ## 8. Project auto-detection
@@ -286,7 +286,7 @@ cleaned through `stop_local_server` when the inventory explicitly reports
 and MCP. It recognizes package scripts and common JavaScript frameworks, honors
 pnpm/yarn/bun lockfiles, and can propose services for Django, FastAPI, Flask,
 Go, Rails, Procfiles, and static sites. Compose files and Makefiles are reported
-as notes but are not automatically converted into runnable services in v0.4.1.
+as notes but are not automatically converted into runnable services in v0.4.2.
 
 Detection returns a proposed config plus human-readable evidence. It never
 saves, trusts, or starts that proposal. The user or agent may correct it before
