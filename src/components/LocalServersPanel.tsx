@@ -11,14 +11,51 @@ import type { LocalServer, LocalServerInventory } from "../types";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { startWindowDrag } from "../titlebar";
 
-function serverState(server: LocalServer): { label: string; tone: string } {
-  if (server.harborInternal) return { label: "Harbor", tone: "accent" };
+function serverState(server: LocalServer): {
+  label: string;
+  tone: string;
+  description: string;
+} {
+  if (server.harborInternal)
+    return {
+      label: "Harbor",
+      tone: "accent",
+      description: "Harbor's private MCP listener.",
+    };
   if (server.tracked && server.external)
-    return { label: "mapped · external", tone: "ok" };
-  if (server.tracked) return { label: "managed", tone: "ok" };
+    return {
+      label: "Mapped",
+      tone: "ok",
+      description: "Started outside Harbor and safely mapped to this project.",
+    };
+  if (server.tracked)
+    return {
+      label: "Managed",
+      tone: "ok",
+      description: "Started and managed by Harbor.",
+    };
   if (server.matchedApp)
-    return { label: "matched · monitor only", tone: "accent" };
-  return { label: "unmapped", tone: "warn" };
+    return {
+      label: "Project found",
+      tone: "accent",
+      description: "Matches a Harbor project, but Harbor is only monitoring it.",
+    };
+  return {
+    label: "Not in Harbor",
+    tone: "neutral",
+    description: "This listener has not been connected to a Harbor project.",
+  };
+}
+
+function isRegisterableProjectRoot(path: string): boolean {
+  const normalized = path.replace(/\/+$/, "") || "/";
+  return (
+    normalized !== "/" &&
+    normalized !== "/opt/homebrew" &&
+    normalized !== "/usr/local" &&
+    !/^\/Users\/[^/]+$/.test(normalized) &&
+    !normalized.startsWith("/Applications/")
+  );
 }
 
 export function LocalServersPanel({
@@ -47,7 +84,7 @@ export function LocalServersPanel({
     }
     refreshInFlight.current = true;
     if (!quiet) setLoading(true);
-    setError(null);
+    if (!quiet) setError(null);
     try {
       do {
         refreshQueued.current = false;
@@ -56,7 +93,8 @@ export function LocalServersPanel({
           const next = await api.listLocalServers();
           if (generation === refreshGeneration.current) setInventory(next);
         } catch (e) {
-          if (generation === refreshGeneration.current) setError(String(e));
+          if (!quiet && generation === refreshGeneration.current)
+            setError(String(e));
         }
       } while (refreshQueued.current);
     } finally {
@@ -101,6 +139,15 @@ export function LocalServersPanel({
     }
   }
 
+  async function openServer(server: LocalServer) {
+    setError(null);
+    try {
+      await api.openUrl(server.url);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   return (
     <>
       <div
@@ -117,16 +164,16 @@ export function LocalServersPanel({
         <Tooltip content="Scan again">
           <button
             className="icon-btn"
-            data-no-drag
             onClick={() => refresh()}
             disabled={loading}
+            aria-label="Scan local servers again"
           >
             <ReloadIcon className={loading ? "spin" : undefined} />
           </button>
         </Tooltip>
       </div>
 
-      <div className="detail-body local-servers-body">
+      <div className="detail-body local-servers-body" aria-busy={loading}>
         <div className="server-summary">
           <span className="chip" data-tone="ok">
             {inventory?.devCount ?? 0} dev servers
@@ -141,15 +188,24 @@ export function LocalServersPanel({
             </span>
           )}
           <label className="server-show-all">
-            <Switch size="1" checked={showAll} onCheckedChange={setShowAll} />
+            <Switch
+              size="1"
+              checked={showAll}
+              onCheckedChange={setShowAll}
+              disabled={(inventory?.otherCount ?? 0) === 0}
+            />
             Show {inventory?.otherCount ?? 0} other listeners
           </label>
         </div>
 
-        {error && <div className="server-error mono">{error}</div>}
+        {error && (
+          <div className="server-error mono" role="alert">
+            {error}
+          </div>
+        )}
 
         {loading && !inventory ? (
-          <div className="server-loading">
+          <div className="server-loading" role="status">
             <Spinner /> Inspecting local listeners…
           </div>
         ) : visible.length === 0 ? (
@@ -157,33 +213,45 @@ export function LocalServersPanel({
             No local development servers are listening right now.
           </div>
         ) : (
-          <div className="server-list">
+          <div className="server-list" role="list">
             {visible.map((server) => {
               const state = serverState(server);
               const canOpen = server.httpStatus != null;
+              const canViewApp =
+                !!server.matchedApp && !server.harborInternal;
+              const canAdd =
+                !server.matchedApp &&
+                !!server.projectRoot &&
+                isRegisterableProjectRoot(server.projectRoot) &&
+                (canOpen || server.safeToStop);
+              const hasActions =
+                canOpen || canViewApp || canAdd || server.safeToStop;
+              const displayedPath = server.projectRoot || server.cwd;
               return (
-                <div
+                <article
                   className="server-card"
                   data-duplicate={server.duplicateCount > 1 || undefined}
                   key={`${server.pid}:${server.port}`}
+                  role="listitem"
                 >
                   <div className="server-card-main">
                     <div className="server-card-title-row">
-                      <div className="server-card-title">
+                      <h2 className="server-card-title">
                         {server.displayName}
                         {canOpen ? (
                           <button
                             className="server-port"
-                            onClick={() => api.openUrl(server.url)}
+                            onClick={() => openServer(server)}
                             title={`Open ${server.url}`}
+                            aria-label={`Open ${server.displayName} on port ${server.port}`}
                           >
                             :{server.port}
                           </button>
                         ) : (
                           <span className="server-port">:{server.port}</span>
                         )}
-                      </div>
-                      <div className="row" style={{ gap: 6, flex: "none" }}>
+                      </h2>
+                      <div className="server-badges">
                         {server.duplicateCount > 1 && (
                           <span className="chip" data-tone="warn">
                             {server.duplicateCount} similar runs
@@ -191,14 +259,25 @@ export function LocalServersPanel({
                         )}
                         {server.networkExposed && (
                           <Tooltip content="This socket is not loopback-only and may be reachable by other devices, depending on your firewall.">
-                            <span className="chip" data-tone="warn">
+                            <span
+                              className="chip"
+                              data-tone="warn"
+                              tabIndex={0}
+                              aria-label="Network visible: this socket may be reachable by other devices, depending on your firewall"
+                            >
                               network-visible
                             </span>
                           </Tooltip>
                         )}
-                        <span className="chip" data-tone={state.tone}>
-                          {state.label}
-                        </span>
+                        <Tooltip content={state.description}>
+                          <span
+                            className="chip"
+                            data-tone={state.tone}
+                            tabIndex={0}
+                          >
+                            {state.label}
+                          </span>
+                        </Tooltip>
                       </div>
                     </div>
 
@@ -210,83 +289,101 @@ export function LocalServersPanel({
                       )}
                     </div>
 
-                    <div className="server-meta">
-                      <span>PID {server.pid}</span>
-                      {server.leaderPid !== server.pid && (
-                        <span>process group {server.leaderPid}</span>
-                      )}
-                      <span>{server.process}</span>
-                      <span title={server.addresses.join(", ")}>
-                        {server.networkExposed
-                          ? "non-loopback bind"
-                          : "loopback-only"}
-                      </span>
-                      {server.matchedService && (
-                        <span>service {server.matchedService}</span>
-                      )}
-                      {server.matchReason && <span>{server.matchReason}</span>}
-                      <span title="Process start time">
-                        started {server.startedAt}
-                      </span>
-                    </div>
-                    <Code className="server-command" title={server.command}>
-                      {server.command}
-                    </Code>
-                    {(server.cwd || server.projectRoot) && (
-                      <div className="server-path mono" title={server.cwd}>
-                        {server.projectRoot || server.cwd}
+                    {displayedPath && (
+                      <div className="server-path mono" title={displayedPath}>
+                        {displayedPath}
                       </div>
                     )}
+
+                    <details className="server-details">
+                      <summary>Technical details</summary>
+                      <div className="server-details-content">
+                        <div className="server-meta">
+                          <span>PID {server.pid}</span>
+                          {server.leaderPid !== server.pid && (
+                            <span>process group {server.leaderPid}</span>
+                          )}
+                          <span>{server.process}</span>
+                          <span title={server.addresses.join(", ")}>
+                            {server.networkExposed
+                              ? "non-loopback bind"
+                              : "loopback-only"}
+                          </span>
+                          {server.matchedService && (
+                            <span>service {server.matchedService}</span>
+                          )}
+                          {server.matchReason && <span>{server.matchReason}</span>}
+                          <span title="Process start time">
+                            started {server.startedAt}
+                          </span>
+                        </div>
+                        <div
+                          className="server-command mono"
+                          title={server.command}
+                        >
+                          {server.command}
+                        </div>
+                      </div>
+                    </details>
                   </div>
 
-                  <div className="server-actions">
-                    {canOpen && (
-                      <Button
-                        size="1"
-                        variant="soft"
-                        onClick={() => api.openUrl(server.url)}
-                      >
-                        <ExternalLinkIcon /> Open
-                      </Button>
-                    )}
-                    {server.matchedApp && !server.harborInternal && (
-                      <Button
-                        size="1"
-                        variant="soft"
-                        color="gray"
-                        onClick={() => onOpenApp(server.matchedApp!)}
-                      >
-                        View app
-                      </Button>
-                    )}
-                    {!server.matchedApp && server.projectRoot && (
-                      <Button
-                        size="1"
-                        variant="soft"
-                        color="gray"
-                        onClick={() => onRegisterPath(server.projectRoot!)}
-                      >
-                        <PlusIcon /> Add to Harbor
-                      </Button>
-                    )}
-                    {server.safeToStop && (
-                      <Button
-                        size="1"
-                        variant="soft"
-                        color="red"
-                        disabled={stopping === server.leaderPid}
-                        onClick={() => setConfirmStop(server)}
-                      >
-                        {stopping === server.leaderPid ? (
-                          <Spinner size="1" />
-                        ) : (
-                          <StopIcon />
-                        )}
-                        Stop
-                      </Button>
-                    )}
-                  </div>
-                </div>
+                  {hasActions && (
+                    <div className="server-actions">
+                      {canOpen && (
+                        <Button
+                          className="server-action server-action-open"
+                          size="1"
+                          variant="soft"
+                          onClick={() => openServer(server)}
+                          aria-label={`Open ${server.displayName} on port ${server.port}`}
+                        >
+                          <ExternalLinkIcon /> <span>Open</span>
+                        </Button>
+                      )}
+                      {canViewApp && (
+                        <Button
+                          className="server-action"
+                          size="1"
+                          variant="soft"
+                          color="gray"
+                          onClick={() => onOpenApp(server.matchedApp!)}
+                          aria-label={`View ${server.matchedApp} in Harbor`}
+                        >
+                          View app
+                        </Button>
+                      )}
+                      {canAdd && (
+                        <Button
+                          className="server-action server-action-add"
+                          size="1"
+                          variant="solid"
+                          onClick={() => onRegisterPath(server.projectRoot!)}
+                          aria-label={`Add ${server.displayName} to Harbor`}
+                        >
+                          <PlusIcon /> <span>Add to Harbor</span>
+                        </Button>
+                      )}
+                      {server.safeToStop && (
+                        <Button
+                          className="server-action server-action-stop"
+                          size="1"
+                          variant="soft"
+                          color="red"
+                          disabled={stopping !== null}
+                          onClick={() => setConfirmStop(server)}
+                          aria-label={`Stop ${server.displayName} on port ${server.port}`}
+                        >
+                          {stopping === server.leaderPid ? (
+                            <Spinner size="1" />
+                          ) : (
+                            <StopIcon />
+                          )}
+                          Stop
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </article>
               );
             })}
           </div>
@@ -299,10 +396,10 @@ export function LocalServersPanel({
         title={`Stop ${confirmStop?.displayName ?? "local server"}?`}
         body={
           <>
-            Harbor will stop the isolated process group listening on port{" "}
-            <Code>{confirmStop?.port}</Code>. It will re-check the PID and start
-            time first, and refuses to stop shells, terminals, IDEs, or coding
-            agents.
+            Harbor will stop the isolated process group that owns port{" "}
+            <Code>{confirmStop?.port}</Code>. Other listeners in the same group
+            may stop too. Harbor re-checks the PID and start time first, and
+            refuses to stop shells, terminals, IDEs, or coding agents.
           </>
         }
         confirmLabel="Stop server"
