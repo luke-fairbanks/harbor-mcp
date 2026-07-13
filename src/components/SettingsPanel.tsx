@@ -46,11 +46,9 @@ function CopyButton({ text, label }: { text: string; label: string }) {
 function ConnectionsHeader() {
   return (
     <header className="connections-header">
-      <p className="connections-eyebrow">AI connections</p>
-      <h1 className="connections-title">One bridge. Every agent.</h1>
+      <h1 className="connections-title">AI connections</h1>
       <p className="connections-intro">
-        Give the tools you already use one safe, local control plane for every
-        project in Harbor.
+        Connect Claude and Codex to manage Harbor projects through MCP.
       </p>
     </header>
   );
@@ -249,7 +247,7 @@ export function SettingsPanel({
             ) : (
               <div className="connections-loading-state" role="status">
                 <Spinner size="2" />
-                <span>Waking the Harbor MCP bridge…</span>
+                <span>Checking MCP server…</span>
               </div>
             )}
           </div>
@@ -277,9 +275,9 @@ export function SettingsPanel({
             <span className="bridge-beacon-ring" />
           </div>
           <div className="bridge-main">
-            <p className="bridge-kicker">Harbor MCP bridge</p>
+            <p className="bridge-kicker">Harbor MCP server</p>
             <h2 className="bridge-title" id="bridge-title">
-              Local control plane
+              Local endpoint
             </h2>
             <div className="bridge-endpoint">
               <Code variant="ghost" className="mono">
@@ -293,7 +291,7 @@ export function SettingsPanel({
             <span>{mcpHealthy ? "Online" : "Offline"}</span>
           </div>
           <div className="bridge-meta">
-            <span>Loopback only</span>
+            <span>This Mac only</span>
             <span aria-hidden>·</span>
             <span>Token protected</span>
             <span aria-hidden>·</span>
@@ -346,12 +344,11 @@ export function SettingsPanel({
         >
           <div className="connections-section-header">
             <div>
-              <p className="connections-eyebrow">Available connections</p>
               <h2
                 className="connections-section-title"
                 id="connections-agents-title"
               >
-                Bring your agents aboard
+                Supported clients
               </h2>
             </div>
             <p className="connections-section-copy">
@@ -374,7 +371,7 @@ export function SettingsPanel({
                 connected={status.codeConnected}
                 available={status.codeCli}
                 unavailableNote="CLI not found"
-                connectedHint="Ready in Claude Code. Run /mcp to use Harbor."
+                connectedHint="Connected. Run /mcp in Claude Code to use Harbor."
                 connectLabel="Connect Claude Code"
                 busy={busy === "code"}
                 onConnect={() => connect("code")}
@@ -400,7 +397,7 @@ export function SettingsPanel({
                 connected={status.desktopConnected}
                 available={status.desktopInstalled}
                 unavailableNote="App not detected"
-                connectedHint="Added. Restart Claude Desktop to use Harbor."
+                connectedHint="Connected. Restart Claude Desktop to use Harbor."
                 connectLabel="Connect Desktop"
                 busy={busy === "desktop"}
                 onConnect={() => connect("desktop")}
@@ -426,7 +423,7 @@ export function SettingsPanel({
                 connected={status.codexConnected}
                 available={status.codexInstalled}
                 unavailableNote="App not detected"
-                connectedHint="Added. Restart Codex to use Harbor."
+                connectedHint="Connected. Restart Codex to use Harbor."
                 connectLabel="Connect Codex"
                 busy={busy === "codex"}
                 onConnect={() => connect("codex")}

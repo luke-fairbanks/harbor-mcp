@@ -22,7 +22,6 @@ import {
   StopIcon,
   TrashIcon,
 } from "@radix-ui/react-icons";
-import { AnimatePresence, motion } from "framer-motion";
 import type {
   AppListItem,
   AppRunSnapshot,
@@ -182,14 +181,13 @@ export function AppDetail({
         onMouseDown={startWindowDrag}
       >
         <div className="app-title-cluster">
-          <div className="page-eyebrow">
-            <span>Project</span>
-            <StatusBadge status={projectStatus} context="Project" />
-          </div>
           <div className="app-title-row">
             <ProjectGlyph name={cfg.name} />
             <div className="app-title-copy">
-              <h1 className="detail-title">{cfg.name}</h1>
+              <div className="project-title-line">
+                <h1 className="detail-title">{cfg.name}</h1>
+                <StatusBadge status={projectStatus} context="Project" />
+              </div>
               <div className="project-health-summary">{healthSummary}</div>
             </div>
           </div>
@@ -228,45 +226,30 @@ export function AppDetail({
             </label>
           )}
 
-          <AnimatePresence mode="wait" initial={false}>
-            {running ? (
-              <motion.div
-                key="stop"
-                initial={{ opacity: 0, scale: 0.97 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.97 }}
-                transition={{ duration: 0.12 }}
+          {running ? (
+            <div>
+              <button
+                className="run-btn"
+                data-kind="stop"
+                disabled={busy !== null}
+                onClick={() => setConfirmStop(true)}
               >
-                <button
-                  className="run-btn"
-                  data-kind="stop"
-                  disabled={busy !== null}
-                  onClick={() => setConfirmStop(true)}
-                >
-                  <StopIcon /> {busy === "stop" ? "Stopping…" : "Stop project"}
-                </button>
-              </motion.div>
-            ) : (
-              <motion.div
-                key="start"
-                initial={{ opacity: 0, scale: 0.97 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.97 }}
-                transition={{ duration: 0.12 }}
+                <StopIcon /> {busy === "stop" ? "Stopping…" : "Stop project"}
+              </button>
+            </div>
+          ) : (
+            <div>
+              <button
+                className="run-btn"
+                disabled={busy !== null || cfg.trusted === false}
+                onClick={() =>
+                  act("start", () => api.startApp(cfg.name, profile))
+                }
               >
-                <button
-                  className="run-btn"
-                  disabled={busy !== null || cfg.trusted === false}
-                  onClick={() =>
-                    act("start", () => api.startApp(cfg.name, profile))
-                  }
-                >
-                  <PlayIcon />{" "}
-                  {busy === "start" ? "Starting…" : "Start project"}
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+                <PlayIcon /> {busy === "start" ? "Starting…" : "Start project"}
+              </button>
+            </div>
+          )}
 
           {running && (
             <>
@@ -331,7 +314,7 @@ export function AppDetail({
           <div className="trust-banner">
             <div>
               <div className="trust-title">
-                Review required before this app can run
+                Review required before this project can run
               </div>
               <div className="trust-copy">
                 An AI agent registered or changed this config. Check the
@@ -391,14 +374,11 @@ export function AppDetail({
               status === "unhealthy";
             const errLine = errored ? lastErrorLine(name) : null;
             return (
-              <motion.div
+              <div
                 className="svc-card"
                 key={name}
                 data-errored={errored}
                 data-status={status}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.18 }}
               >
                 <div className="svc-card-top">
                   <span className="svc-name">
@@ -407,11 +387,11 @@ export function AppDetail({
                   </span>
                   <span className="svc-status-group">
                     {sr?.external ? (
-                      <Tooltip content="Started outside Harbor (e.g. from a terminal). Harbor matched this process to the app by its port and project folder. Open and Stop work, but live logs aren't captured — Stop here, then Start to run it under Harbor with logs.">
+                      <Tooltip content="Started outside Harbor and matched by port and folder. Stop it, then start it in Harbor to capture logs.">
                         <span className="external-tag">external</span>
                       </Tooltip>
                     ) : sr?.adopted ? (
-                      <Tooltip content="Recovered from a previous Harbor session — Harbor holds its process and port, but live logs aren't available. Stop & Start to recapture output.">
+                      <Tooltip content="Recovered from a previous Harbor session. Restart it to capture logs.">
                         <span className="adopted-tag">adopted</span>
                       </Tooltip>
                     ) : null}
@@ -506,7 +486,7 @@ export function AppDetail({
                     </div>
                   </>
                 )}
-              </motion.div>
+              </div>
             );
           })}
         </div>

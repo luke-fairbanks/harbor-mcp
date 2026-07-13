@@ -1,28 +1,17 @@
 import {
   ArrowRightIcon,
-  CheckCircledIcon,
   ExclamationTriangleIcon,
-  GearIcon,
-  GlobeIcon,
   LightningBoltIcon,
   PlusIcon,
 } from "@radix-ui/react-icons";
-import type {
-  AgentStatus,
-  AppListItem,
-  AppRunSnapshot,
-  ServiceStatus,
-} from "../types";
+import type { AppListItem, AppRunSnapshot, ServiceStatus } from "../types";
 import { aggregateStatus, StatusDot } from "./StatusDot";
 
 type OverviewPanelProps = {
   items: AppListItem[];
   live: Record<string, AppRunSnapshot>;
-  agents: AgentStatus | null;
   onOpenApp: (name: string) => void;
   onAddProject: () => void;
-  onOpenServers: () => void;
-  onOpenConnections: () => void;
 };
 
 const STATUS_LABEL: Record<ServiceStatus, string> = {
@@ -40,11 +29,8 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`) {
 export function OverviewPanel({
   items,
   live,
-  agents,
   onOpenApp,
   onAddProject,
-  onOpenServers,
-  onOpenConnections,
 }: OverviewPanelProps) {
   const projects = items.map((item) => {
     const run = live[item.config.name] ?? item.run;
@@ -91,14 +77,6 @@ export function OverviewPanel({
   const attentionCount = projects.filter(
     (project) => project.needsAttention,
   ).length;
-  const connectedAgents = agents
-    ? [
-        agents.codeConnected,
-        agents.desktopConnected,
-        agents.codexConnected,
-      ].filter(Boolean).length
-    : 0;
-
   const hero = attentionCount
     ? {
         state: "attention",
@@ -112,34 +90,33 @@ export function OverviewPanel({
     : runningProjects
       ? {
           state: "active",
-          eyebrow: "Local stack online",
-          title: "Everything is running smoothly.",
-          copy: `${plural(runningProjects, "project")} and ${plural(liveServices, "service")} are live on this Mac.`,
+          eyebrow: "Projects running",
+          title: "All running services are healthy.",
+          copy: `${plural(runningProjects, "project")} and ${plural(liveServices, "service")} are running on this Mac.`,
         }
       : items.length
         ? {
             state: "idle",
-            eyebrow: "All clear",
-            title: "Your harbor is quiet.",
-            copy: "Your projects are ready when you are. Start one from its project page or inspect what is already listening locally.",
+            eyebrow: "No projects running",
+            title: "Projects are stopped.",
+            copy: "Start a project or review the servers already running on this Mac.",
           }
         : {
             state: "empty",
-            eyebrow: "Welcome to Harbor",
-            title: "Bring your local stack into view.",
-            copy: "Add a project or inspect the servers already running on this Mac. Harbor will map the pieces without taking over your workflow.",
+            eyebrow: "Get started",
+            title: "Add your first project.",
+            copy: "Choose a project folder or review servers already running on this Mac.",
           };
 
   return (
     <section className="overview-page" aria-labelledby="overview-title">
       <header className="page-header overview-header">
         <div className="page-header-copy">
-          <div className="page-eyebrow">Control deck</div>
           <h1 className="page-title" id="overview-title">
             Overview
           </h1>
           <p className="page-description">
-            Projects, local services, and AI connections at a glance.
+            Projects, services, and connections.
           </p>
         </div>
         <button
@@ -172,63 +149,7 @@ export function OverviewPanel({
               {hero.title}
             </h2>
             <p className="overview-hero-copy">{hero.copy}</p>
-
-            <div className="overview-quick-actions" aria-label="Quick actions">
-              <button
-                type="button"
-                className="overview-quick-action overview-quick-action-primary"
-                onClick={onAddProject}
-                aria-label="Add a new project to Harbor"
-              >
-                <PlusIcon aria-hidden="true" />
-                <span>
-                  <strong>Add a project</strong>
-                  <small>Scan a folder and create its services</small>
-                </span>
-                <ArrowRightIcon aria-hidden="true" />
-              </button>
-              <button
-                type="button"
-                className="overview-quick-action"
-                onClick={onOpenServers}
-                aria-label="Inspect local servers running on this Mac"
-              >
-                <GlobeIcon aria-hidden="true" />
-                <span>
-                  <strong>Local servers</strong>
-                  <small>See every listener and duplicate</small>
-                </span>
-                <ArrowRightIcon aria-hidden="true" />
-              </button>
-            </div>
           </div>
-
-          <button
-            type="button"
-            className="overview-connection-card"
-            data-connected={connectedAgents > 0 || undefined}
-            onClick={onOpenConnections}
-            aria-label={
-              connectedAgents
-                ? `Manage ${plural(connectedAgents, "connected AI client")}`
-                : "Connect an AI client to Harbor"
-            }
-          >
-            <span className="overview-connection-icon" aria-hidden="true">
-              {connectedAgents ? <CheckCircledIcon /> : <GearIcon />}
-            </span>
-            <span className="overview-connection-copy">
-              <small>AI connections</small>
-              <strong>
-                {agents === null
-                  ? "Checking connections…"
-                  : connectedAgents
-                    ? plural(connectedAgents, "client connected")
-                    : "Ready to connect"}
-              </strong>
-            </span>
-            <ArrowRightIcon aria-hidden="true" />
-          </button>
         </section>
 
         <dl className="overview-metrics" aria-label="Harbor activity summary">
@@ -240,9 +161,9 @@ export function OverviewPanel({
             </dd>
           </div>
           <div className="overview-metric" data-tone="service">
-            <dt>Live services</dt>
+            <dt>Running services</dt>
             <dd className="overview-metric-value">{liveServices}</dd>
-            <dd className="overview-metric-detail">across this Mac</dd>
+            <dd className="overview-metric-detail">on this Mac</dd>
           </div>
           <div
             className="overview-metric"
@@ -251,24 +172,23 @@ export function OverviewPanel({
             <dt>Needs attention</dt>
             <dd className="overview-metric-value">{attentionCount}</dd>
             <dd className="overview-metric-detail">
-              {attentionCount ? "review or repair" : "all systems clear"}
+              {attentionCount ? "review or repair" : "none"}
             </dd>
           </div>
         </dl>
 
-        <section
-          className="overview-projects"
-          aria-labelledby="overview-projects-title"
-        >
-          <div className="overview-section-heading">
-            <div>
-              <div className="page-eyebrow">Workspace</div>
-              <h2 id="overview-projects-title">Projects</h2>
+        {projects.length > 0 && (
+          <section
+            className="overview-projects"
+            aria-labelledby="overview-projects-title"
+          >
+            <div className="overview-section-heading">
+              <div>
+                <h2 id="overview-projects-title">Projects</h2>
+              </div>
+              <span>{plural(items.length, "project")}</span>
             </div>
-            <span>{plural(items.length, "project")}</span>
-          </div>
 
-          {projects.length ? (
             <ul className="overview-project-grid">
               {projects.map(
                 ({
@@ -350,27 +270,8 @@ export function OverviewPanel({
                 },
               )}
             </ul>
-          ) : (
-            <div className="overview-project-empty">
-              <span className="overview-project-empty-icon" aria-hidden="true">
-                <PlusIcon />
-              </span>
-              <h3>Your projects will dock here.</h3>
-              <p>
-                Add a folder for Harbor to detect its services, commands, and
-                ports automatically.
-              </p>
-              <div className="overview-project-empty-actions">
-                <button type="button" onClick={onAddProject}>
-                  <PlusIcon aria-hidden="true" /> Add project
-                </button>
-                <button type="button" onClick={onOpenServers}>
-                  <GlobeIcon aria-hidden="true" /> Inspect local servers
-                </button>
-              </div>
-            </div>
-          )}
-        </section>
+          </section>
+        )}
       </div>
     </section>
   );

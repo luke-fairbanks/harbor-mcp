@@ -100,11 +100,10 @@ export function RegisterDialog({
     >
       <Dialog.Content maxWidth="620px" className="register-dialog">
         <div className="register-heading">
-          <div className="page-eyebrow">Project intake</div>
           <Dialog.Title>Add a project</Dialog.Title>
           <Dialog.Description size="2" color="gray">
-            Harbor reads the project folder, proposes its services, and waits
-            for you to approve before anything runs.
+            Harbor detects services and commands in this folder. Review them
+            before anything runs.
           </Dialog.Description>
         </div>
 

@@ -21,9 +21,9 @@ function serverState(server: LocalServer): {
 } {
   if (server.harborInternal)
     return {
-      label: "Harbor",
-      tone: "accent",
-      description: "Harbor's private MCP listener.",
+      label: "Harbor MCP",
+      tone: "neutral",
+      description: "Harbor's local MCP server.",
     };
   if (server.tracked && server.external)
     return {
@@ -40,14 +40,14 @@ function serverState(server: LocalServer): {
   if (server.matchedApp)
     return {
       label: "Project found",
-      tone: "accent",
+      tone: "neutral",
       description:
         "Matches a Harbor project, but Harbor is only monitoring it.",
     };
   return {
     label: "Not in Harbor",
     tone: "neutral",
-    description: "This listener has not been connected to a Harbor project.",
+    description: "This server has not been connected to a Harbor project.",
   };
 }
 
@@ -162,11 +162,10 @@ export function LocalServersPanel({
         onMouseDown={startWindowDrag}
       >
         <div className="page-title-block">
-          <div className="page-eyebrow">Machine inventory</div>
           <h1 className="detail-title">Local servers</h1>
           <div className="detail-sub">
-            See every development listener, spot duplicates, and bring the right
-            process under Harbor control.
+            Review local development servers, find duplicate processes, and add
+            projects to Harbor.
           </div>
         </div>
         <Tooltip content="Scan again">
@@ -209,7 +208,7 @@ export function LocalServersPanel({
               onCheckedChange={setShowAll}
               disabled={(inventory?.otherCount ?? 0) === 0}
             />
-            Include {inventory?.otherCount ?? 0} system listeners
+            Include {inventory?.otherCount ?? 0} other servers
           </label>
         </div>
 
@@ -221,13 +220,13 @@ export function LocalServersPanel({
 
         {loading && !inventory ? (
           <div className="server-loading" role="status">
-            <Spinner /> Inspecting local listeners…
+            <Spinner /> Scanning local servers…
           </div>
         ) : visible.length === 0 ? (
           <div className="server-empty">
             <HarborBeacon size={82} />
-            <strong>The coast is clear</strong>
-            <span>No local development servers are listening right now.</span>
+            <strong>No development servers found.</strong>
+            <span>Start a project, then scan again.</span>
             <Button size="2" variant="soft" onClick={() => refresh()}>
               <ReloadIcon /> Scan again
             </Button>
@@ -243,8 +242,7 @@ export function LocalServersPanel({
                 !!server.projectRoot &&
                 isRegisterableProjectRoot(server.projectRoot) &&
                 (canOpen || server.safeToStop);
-              const hasActions =
-                canOpen || canViewApp || canAdd || server.safeToStop;
+              const hasActions = canViewApp || canAdd || server.safeToStop;
               const displayedPath = server.projectRoot || server.cwd;
               return (
                 <article
@@ -292,7 +290,7 @@ export function LocalServersPanel({
                       <div className="server-badges">
                         {server.duplicateCount > 1 && (
                           <span className="chip" data-tone="warn">
-                            {server.duplicateCount} similar runs
+                            {server.duplicateCount} matching processes
                           </span>
                         )}
                         {server.networkExposed && (
@@ -301,9 +299,9 @@ export function LocalServersPanel({
                               className="chip"
                               data-tone="warn"
                               tabIndex={0}
-                              aria-label="Network visible: this socket may be reachable by other devices, depending on your firewall"
+                              aria-label="Available on network: this socket may be reachable by other devices, depending on your firewall"
                             >
-                              Network visible
+                              Available on network
                             </span>
                           </Tooltip>
                         )}
@@ -382,17 +380,6 @@ export function LocalServersPanel({
                           aria-label={`View ${server.matchedApp} in Harbor`}
                         >
                           View project
-                        </Button>
-                      )}
-                      {canOpen && (
-                        <Button
-                          className="server-action server-action-open"
-                          size="1"
-                          variant="soft"
-                          onClick={() => openServer(server)}
-                          aria-label={`Open ${server.displayName} on port ${server.port}`}
-                        >
-                          <ExternalLinkIcon /> <span>Open</span>
                         </Button>
                       )}
                       {server.safeToStop && (

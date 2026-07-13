@@ -45,7 +45,10 @@ export function StatusBadge({
 }) {
   const tone = STATUS_TONE[status];
   const color = STATUS_COLOR[status];
-  const label = STATUS_LABEL[status];
+  const label =
+    context === "Project" && status === "ready"
+      ? "Running"
+      : STATUS_LABEL[status];
   return (
     <span
       className="badge"

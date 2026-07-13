@@ -1,14 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DropdownMenu, Tooltip } from "@radix-ui/themes";
 import {
-  CheckCircledIcon,
   DashboardIcon,
   DotsHorizontalIcon,
   GlobeIcon,
   Link2Icon,
   PlusIcon,
 } from "@radix-ui/react-icons";
-import { AnimatePresence, motion } from "framer-motion";
 import { api, onLog, onRegistry, onSelect, onStats, onStatus } from "./api";
 import type {
   AgentStatus,
@@ -219,10 +217,6 @@ export default function App() {
     agents?.codexConnected ? "Codex" : null,
   ].filter(Boolean) as string[];
   const agentsConnected = connectedNames.length > 0;
-  const bridgeLabel = agentsConnected
-    ? `${connectedNames.length} connected`
-    : "Not connected";
-
   const runningCount = items.filter(
     (item) => live[item.config.name]?.running ?? item.running,
   ).length;
@@ -279,7 +273,7 @@ export default function App() {
             </span>
             <span className="sidebar-brand-copy">
               <strong>Harbor</strong>
-              <small>Local control deck</small>
+              <small>Local development</small>
             </span>
           </span>
           <DropdownMenu.Root>
@@ -308,20 +302,6 @@ export default function App() {
               </DropdownMenu.Item>
             </DropdownMenu.Content>
           </DropdownMenu.Root>
-        </div>
-
-        <div
-          className="sidebar-running"
-          aria-label={`${runningCount} projects running`}
-        >
-          <span
-            className="sidebar-running-pulse"
-            data-active={runningCount > 0 || undefined}
-          />
-          <span>
-            {runningCount > 0 ? `${runningCount} running` : "All quiet"}
-          </span>
-          <span className="sidebar-running-total">{items.length} projects</span>
         </div>
 
         <nav className="sidebar-nav" aria-label="Harbor navigation">
@@ -392,7 +372,13 @@ export default function App() {
                 ? "Review required"
                 : status === "stopped"
                   ? "Idle"
-                  : status;
+                  : status === "ready"
+                    ? "Running"
+                    : status === "starting"
+                      ? "Starting"
+                      : status === "unhealthy"
+                        ? "Needs attention"
+                        : "Exited";
             return (
               <button
                 key={name}
@@ -405,13 +391,7 @@ export default function App() {
                   setView("app");
                 }}
               >
-                {isSel && (
-                  <motion.span
-                    layoutId="app-sel"
-                    className="app-sel"
-                    transition={{ type: "spring", stiffness: 420, damping: 38 }}
-                  />
-                )}
+                {isSel && <span className="app-sel" aria-hidden="true" />}
                 <ProjectGlyph name={name} compact />
                 <span className="app-item-copy">
                   <span className="app-name">{name}</span>
@@ -427,90 +407,61 @@ export default function App() {
             );
           })}
         </nav>
-
-        <div className="sidebar-foot">
-          <button
-            className="sidebar-bridge-status"
-            data-connected={agentsConnected || undefined}
-            onClick={() => setView("settings")}
-            aria-label={`AI connections: ${bridgeLabel}`}
-          >
-            <span className="bridge-status-icon">
-              {agentsConnected ? <CheckCircledIcon /> : <Link2Icon />}
-            </span>
-            <span>
-              <strong>Harbor Bridge</strong>
-              <small>{bridgeLabel}</small>
-            </span>
-          </button>
-        </div>
       </aside>
 
       <main className="harbor-detail">
-        <AnimatePresence mode="wait" initial={false}>
-          <motion.section
-            className="view-frame"
-            key={view === "app" ? `app:${selected ?? "none"}` : view}
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -2 }}
-            transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
-          >
-            {view === "overview" ? (
-              <OverviewPanel
-                items={items}
-                live={live}
-                agents={agents}
-                onOpenApp={(name) => {
-                  setSelected(name);
-                  setView("app");
-                }}
-                onAddProject={() => setRegisterOpen(true)}
-                onOpenServers={() => setView("servers")}
-                onOpenConnections={() => setView("settings")}
-              />
-            ) : view === "settings" ? (
-              <SettingsPanel onAgentsChanged={refreshAgents} />
-            ) : view === "servers" ? (
-              <LocalServersPanel
-                onOpenApp={(name) => {
-                  setSelected(name);
-                  setView("app");
-                }}
-                onRegisterPath={registerDetectedPath}
-              />
-            ) : selectedItem ? (
-              <AppDetail
-                key={selectedItem.config.name}
-                item={selectedItem}
-                run={live[selectedItem.config.name]}
-                logs={logs[selectedItem.config.name] ?? []}
-                onChanged={() => {
-                  refreshApp(selectedItem.config.name);
-                  refreshList();
-                }}
-                onRemoved={() => {
-                  setSelected(null);
-                  setView("overview");
-                  refreshList();
-                }}
-              />
-            ) : (
-              <OverviewPanel
-                items={items}
-                live={live}
-                agents={agents}
-                onOpenApp={(name) => {
-                  setSelected(name);
-                  setView("app");
-                }}
-                onAddProject={() => setRegisterOpen(true)}
-                onOpenServers={() => setView("servers")}
-                onOpenConnections={() => setView("settings")}
-              />
-            )}
-          </motion.section>
-        </AnimatePresence>
+        <section
+          className="view-frame"
+          key={view === "app" ? `app:${selected ?? "none"}` : view}
+        >
+          {view === "overview" ? (
+            <OverviewPanel
+              items={items}
+              live={live}
+              onOpenApp={(name) => {
+                setSelected(name);
+                setView("app");
+              }}
+              onAddProject={() => setRegisterOpen(true)}
+            />
+          ) : view === "settings" ? (
+            <SettingsPanel onAgentsChanged={refreshAgents} />
+          ) : view === "servers" ? (
+            <LocalServersPanel
+              onOpenApp={(name) => {
+                setSelected(name);
+                setView("app");
+              }}
+              onRegisterPath={registerDetectedPath}
+            />
+          ) : selectedItem ? (
+            <AppDetail
+              key={selectedItem.config.name}
+              item={selectedItem}
+              run={live[selectedItem.config.name]}
+              logs={logs[selectedItem.config.name] ?? []}
+              onChanged={() => {
+                refreshApp(selectedItem.config.name);
+                refreshList();
+              }}
+              onRemoved={() => {
+                setSelected(null);
+                setView("overview");
+                refreshList();
+              }}
+            />
+          ) : (
+            <OverviewPanel
+              items={items}
+              live={live}
+              onOpenApp={(name) => {
+                setSelected(name);
+                setView("app");
+              }}
+              onAddProject={() => setRegisterOpen(true)}
+            />
+          )}
+        </section>
       </main>
 
       <RegisterDialog
@@ -536,8 +487,8 @@ export default function App() {
       <ConfirmDialog
         open={confirmStopAll}
         onOpenChange={setConfirmStopAll}
-        title="Stop all running apps?"
-        body="Sends SIGTERM then SIGKILL to every running app's process group, including any servers started outside Harbor."
+        title="Stop all running projects?"
+        body="Harbor will stop every running project and any external servers it currently manages."
         confirmLabel="Stop all"
         danger
         onConfirm={doStopAll}

@@ -167,7 +167,6 @@ export function ConfigEditor({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Content maxWidth="820px" className="config-dialog">
         <div className="config-dialog-head">
-          <div className="page-eyebrow">Project settings</div>
           <Dialog.Title>Edit {app.name}</Dialog.Title>
           <Dialog.Description size="2" color="gray" mb="3">
             Changes are saved to Harbor's registry — your project's source is
