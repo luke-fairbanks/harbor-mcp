@@ -124,6 +124,32 @@ jobs:
           releaseDraft: true
           prerelease: false
 
+      # Tauri notarizes and staples the app before creating the DMG. Submit the
+      # finished DMG as well so Gatekeeper can verify the exact outermost file
+      # users download, including when their Mac is offline.
+      - name: Notarize, staple, and replace signed DMG
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          dmg="src-tauri/target/universal-apple-darwin/release/bundle/dmg/Harbor_${version}_universal.dmg"
+
+          test -f "$dmg"
+          xcrun notarytool submit "$dmg" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          codesign --verify --strict --verbose=2 "$dmg"
+          spctl -a -vvv -t open --context context:primary-signature "$dmg"
+          gh release upload "$GITHUB_REF_NAME" "$dmg" --clobber
+
       # --- Unsigned build (no Apple secrets configured) ---
       - name: Build and publish (unsigned)
         if: steps.signing.outputs.enabled == 'false'
