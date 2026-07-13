@@ -1,9 +1,20 @@
 # Security Policy
 
 Harbor runs locally. Its embedded MCP server binds to 127.0.0.1 only and
-requires a per-launch bearer token. The release workflow supports Apple
-Developer ID signing and notarization when the repository's signing secrets are
-configured; unsigned artifacts are identified in their release notes.
+requires a per-launch bearer token.
+
+Production releases use two independent trust layers:
+
+- Harbor's updater archives are signed with the dedicated updater signing key.
+  The app verifies that signature with its embedded public key before installing
+  an update.
+- The app and disk image are signed with Faba Development's Apple Developer ID,
+  notarized by Apple, and stapled so macOS can verify their origin and integrity.
+
+The production release workflow fails closed. It requires both signing systems,
+then verifies the updater signature, Developer ID signature, Gatekeeper
+assessment, and notarization. Unsigned or otherwise unverifiable artifacts fail
+the workflow and must remain an unpublished draft.
 
 On shared Macs, prefer Harbor's one-click launcher. It checks that the listener
 is owned by the current user before forwarding credentials, and Harbor rotates

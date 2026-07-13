@@ -69,8 +69,10 @@ Download the **`.dmg`** from the
 [latest release](https://github.com/luke-fairbanks/harbor-mcp/releases), open it,
 and drag Harbor to Applications. Production releases are signed by Faba
 Development, notarized by Apple, and cryptographically verified by the release
-workflow. Starting with v0.4.0, Harbor checks for signed updates automatically;
-you can also check from **Settings → Harbor updates**.
+workflow. Starting with v0.4.0, Harbor checks for signed updates shortly after
+launch and every six hours. When an update is available, Harbor asks before it
+installs and relaunches; managed projects stay online while the desktop app
+restarts. You can also check anytime from **Settings → Harbor updates**.
 
 Or with Homebrew:
 

@@ -1,8 +1,12 @@
 name: Release
 
-# Cut a release by pushing a version tag that matches the version in
-# src-tauri/tauri.conf.json, e.g.:
-#   git tag v0.4.0 && git push origin v0.4.0
+# Cut a release with an annotated version tag after pushing main. The tag must
+# match the version in src-tauri/tauri.conf.json, e.g.:
+#   git push origin main
+#   git tag -a vX.Y.Z -m "Harbor vX.Y.Z"
+#   git push origin vX.Y.Z
+# See DISTRIBUTING.md for the complete versioning, verification, and publishing
+# checklist.
 # Builds a UNIVERSAL (Intel + Apple Silicon) .dmg and attaches it to a draft
 # GitHub Release. Production releases fail closed unless both Apple/Faba and
 # Tauri updater signing credentials are present (see DISTRIBUTING.md).
