@@ -1,6 +1,6 @@
 # Harbor product marketing context
 
-Last updated: July 13, 2026
+Last updated: July 14, 2026
 
 ## Product
 
@@ -13,6 +13,10 @@ the same runtime view and lifecycle tools.
 Harbor is free, open source under MIT, macOS 11+ only, universal for Apple
 Silicon and Intel, signed by Faba Development, notarized by Apple, and delivered
 through signed user-approved updates.
+
+The public landing page is live on GitHub Pages with direct DMG and Homebrew
+installation paths, real scrubbed product screenshots, no third-party scripts,
+and no analytics.
 
 ## Primary audience
 
@@ -105,7 +109,7 @@ fragile competitive absolutes.
 
 ## Primary actions
 
-1. Download the signed DMG from the latest GitHub release.
+1. Visit the landing page and download the signed DMG from the latest release.
 2. Install through `brew install --cask luke-fairbanks/tap/harbor`.
 3. Add a real project and inspect Local Servers.
 4. Optionally connect Claude or Codex.
@@ -113,6 +117,7 @@ fragile competitive absolutes.
 
 ## Canonical links
 
+- Website: <https://luke-fairbanks.github.io/harbor-mcp/>
 - Repository: <https://github.com/luke-fairbanks/harbor-mcp>
 - Latest release: <https://github.com/luke-fairbanks/harbor-mcp/releases/latest>
 - Roadmap: <https://github.com/luke-fairbanks/harbor-mcp/blob/main/ROADMAP.md>
