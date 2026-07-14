@@ -4,7 +4,7 @@
 > one place to understand what is running, prevent accidental duplicates, and
 > safely operate a project's local services.
 
-This document describes the architecture shipped in **Harbor v0.4.2**. Product
+This document describes Harbor's current shipped architecture. Product
 priorities that are not implemented yet belong in [`ROADMAP.md`](./ROADMAP.md),
 and the signed release procedure belongs in
 [`DISTRIBUTING.md`](./DISTRIBUTING.md).
@@ -73,10 +73,13 @@ different capabilities. The implementation follows these rules:
 │                                  process groups, logs,       ▲              │
 │                                  health, resources           │ bearer token │
 │                                            │                 │              │
-│                   listener discovery ◀──── macOS ───── AI client/bridge    │
+│                   listener discovery ◀──── macOS                           │
 └────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      └── signed updater ──▶ GitHub Releases
+                 ▲ Streamable HTTP + bearer token
+                 │ follows owner-only descriptor
+        signed native stdio bridge ◀──── stdio ──── Claude / Codex
+
+        GitHub Releases ───── signed updater ─────▶ Harbor.app
 ```
 
 `AppState` is the live boundary shared by the Tauri command layer and the MCP
@@ -119,17 +122,37 @@ Harbor does not issue an MCP session ID or expose a standalone SSE stream.
   live port and token are written to the protected `mcp.json` descriptor.
 - Harbor is single-instance. A second launch focuses the existing window rather
   than racing the endpoint or descriptor.
-- One-click Claude Code, Claude Desktop, and Codex setup installs an owner-only
-  launcher that reads the live descriptor, opens Harbor quietly when necessary,
-  and runs the pinned `mcp-remote@0.1.38` adapter.
-- The restart-safe launcher currently requires Node.js/npx and may need network
-  access on first use. Advanced users can connect directly with native HTTP,
-  but that configuration is tied to the current launch's port and token.
+- Harbor bundles a signed Rust stdio bridge as a Tauri `externalBin`. On every
+  GUI launch it checks the bridge's independent version and, when missing or
+  newer, atomically installs it at the existing owner-only app-support command.
+  Equivalent re-signed bytes leave the installed inode untouched, so an app-only
+  update does not manufacture a client-restart requirement.
+- One-click Claude Code, Claude Desktop, and Codex setup writes only that stable
+  command path. New configurations contain no token or environment values and
+  require no separate runtime or first-run download.
+- The bridge re-reads the protected descriptor before client messages, validates
+  that the loopback listener belongs to the current macOS user, authenticates
+  Harbor's health response, and then forwards JSON-RPC over Streamable HTTP.
+- If Harbor is unavailable, the bridge starts the signed app as a background
+  service and waits for a healthy descriptor. It uses the fixed Harbor app path
+  recorded by the app; legacy descriptors fall back to a fixed `open -a Harbor`
+  invocation rather than treating descriptor contents as shell syntax.
+- When the descriptor's instance, token, or port changes, the same client-owned
+  stdio process reconnects and replays the MCP initialize/initialized lifecycle
+  against the new backend before forwarding the next request. It never replays
+  an ambiguously completed tool call.
+- Existing users need one client restart when moving from v0.4.2's legacy
+  launcher. Normal Harbor quit/reopen and token/port rotation need no client
+  restart after that. Replacing the bridge binary itself still requires a client
+  restart for a running MCP host to load the new executable.
+- Advanced users can connect directly with native HTTP, but that configuration
+  is tied to the current launch's port and token and does not gain reconnect or
+  background-start behavior.
 - Every tool advertises object-form input and output schemas. In particular,
   the uniform `result` output is an object schema rather than JSON Schema's
   boolean `true` form, which some desktop MCP hosts reject even though it is
   valid JSON Schema.
-- The AI connections UI reports managed launcher configuration separately from
+- The AI connections UI reports managed bridge configuration separately from
   an observed **Bridge running** process. Process observation cannot prove a
   host accepted the tool catalog, so client compatibility is verified with a
   real host restart plus `scripts/mcp-bridge-soak.mjs`.
@@ -221,7 +244,7 @@ removed from exported `harbor.json` files.
 
 ## 6. MCP tool surface and approval flow
 
-The v0.4.2 MCP server exposes these tools:
+The MCP server exposes these tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -264,7 +287,12 @@ cleaned through `stop_local_server` when the inventory explicitly reports
 - MCP is reachable only on loopback and requires a per-launch bearer token.
 - The app-data directory is owner-only (`0700`). Central registry, run,
   credential, agent-config, and safety-backup files are written owner-only
-  (`0600`) on Unix; the executable MCP launcher is `0700`.
+  (`0600`) on Unix; the installed native MCP bridge is `0700`.
+- The bridge opens `mcp.json` without following symlinks, requires a regular
+  owner-only file owned by the current user, bounds and validates its fields,
+  fixes the destination to `127.0.0.1`, disables HTTP proxy use and redirects,
+  verifies listener ownership, and checks Harbor's authenticated health route
+  before sending the bearer token.
 - Private central-state and agent-config writes are atomic, reducing
   partial-file corruption. Registry persistence completes before live state is
   replaced.
@@ -277,7 +305,7 @@ cleaned through `stop_local_server` when the inventory explicitly reports
 - Network-visible binds are labeled as warnings; Harbor does not interpret that
   label as a firewall or exposure guarantee.
 - Service environment values are currently stored in the protected JSON
-  registry. v0.4.2 does not yet move secrets into Keychain; that work is tracked
+  registry. Harbor does not yet move secrets into Keychain; that work is tracked
   in [`ROADMAP.md`](./ROADMAP.md).
 
 ## 8. Project auto-detection
@@ -286,7 +314,7 @@ cleaned through `stop_local_server` when the inventory explicitly reports
 and MCP. It recognizes package scripts and common JavaScript frameworks, honors
 pnpm/yarn/bun lockfiles, and can propose services for Django, FastAPI, Flask,
 Go, Rails, Procfiles, and static sites. Compose files and Makefiles are reported
-as notes but are not automatically converted into runnable services in v0.4.2.
+as notes but are not automatically converted into runnable services.
 
 Detection returns a proposed config plus human-readable evidence. It never
 saves, trusts, or starts that proposal. The user or agent may correct it before
@@ -364,13 +392,19 @@ Production releases are universal macOS builds distributed as a DMG through
 GitHub Releases and the Homebrew tap. The protected tag workflow:
 
 1. verifies the release tag and all version fields against `main`;
-2. runs frontend and Rust tests, formatting, linting, and bridge syntax checks;
-3. builds for Apple Silicon and Intel;
-4. signs with **Developer ID Application: Faba Development LLC**;
-5. notarizes and staples both the app and finished DMG;
-6. signs the updater archive with Harbor's separate Tauri updater key;
-7. creates a draft release and verifies the updater signature, Apple signature,
-   Gatekeeper acceptance, and notarization before publication.
+2. prepares the native bridge and runs frontend plus both Rust crates' tests,
+   formatting, and linting;
+3. builds the bridge for Apple Silicon and Intel, combines it into one universal
+   executable, and bundles it as a Tauri `externalBin`;
+4. builds the universal app and signs it with **Developer ID Application: Faba
+   Development LLC**;
+5. verifies both architectures and the bridge's code signature inside the app,
+   then copies it outside the bundle and verifies the standalone signature too;
+6. notarizes and staples both the app and finished DMG;
+7. signs the updater archive with Harbor's separate Tauri updater key;
+8. creates a draft release and verifies the updater signature, Apple signature,
+   Gatekeeper acceptance, notarization, and embedded/standalone bridge checks
+   before publication.
 
 The release contains a universal DMG, universal app updater archive and
 signature, and `latest.json` entries for both Mac architectures. This is the
@@ -401,8 +435,9 @@ Harbor uses flat JSON, not SQLite. The central source of truth lives under:
 |------|----------|
 | `registry.json` | Map of app name to full `AppConfig`, including local trust state. |
 | `runs.json` | Process identities used for verified adoption after relaunch. |
-| `mcp.json` | Current MCP port and per-launch bearer token. |
-| `harbor-mcp-bridge` | Restart-safe owner-only launcher installed by agent setup. |
+| `mcp.json` | Current MCP instance identity, process evidence, port, per-launch bearer token, and signed app path. |
+| `harbor-mcp-bridge` | Signed native stdio bridge at the stable owner-only client command. |
+| `harbor-mcp-bridge.version` | Independent bridge SemVer used to avoid replacing equivalent re-signed code. |
 
 The in-memory registry is an `RwLock<BTreeMap<String, AppConfig>>` shared with
 the supervisor. Mutations clone and validate the next registry, atomically save
@@ -431,19 +466,22 @@ file's project directory, and exported configs never carry machine-local trust.
 | `mcp.rs` | Authenticated `rmcp` Streamable-HTTP server and tool definitions. |
 | `tray.rs` | Menu-bar icon and popover behavior. |
 | `lib.rs` | Tauri plugins, startup wiring, adoption, MCP hosting, and shutdown behavior. |
+| `mcp-bridge/` | Standalone Rust stdio bridge, descriptor validation, backend lifecycle replay, and reconnect tests. |
+| `scripts/prepare-native-bridge.mjs` | Builds target-suffixed bridge binaries and combines the universal release sidecar. |
 
 Primary local verification:
 
 ```bash
+npm run prepare:bridge
 npm test
 npm run build
+npm run test:rust
 
-(
-  cd src-tauri
-  cargo fmt --all -- --check
-  cargo clippy --locked --all-targets -- -D warnings
-  cargo test --locked
-)
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo fmt --manifest-path src-tauri/mcp-bridge/Cargo.toml --all -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+cargo clippy --manifest-path src-tauri/mcp-bridge/Cargo.toml --locked --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/mcp-bridge/Cargo.toml --locked
 
 git diff --check
 ```
@@ -452,5 +490,5 @@ For MCP-facing changes, run the patched app with an existing one-click client
 configuration and add this live bridge check:
 
 ```bash
-node scripts/mcp-bridge-soak.mjs --duration-ms 90000 --interval-ms 30000
+node scripts/mcp-bridge-soak.mjs --restart-harbor --duration-ms 90000 --interval-ms 30000
 ```

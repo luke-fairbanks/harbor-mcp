@@ -138,6 +138,12 @@ Update these exact values:
   `harbor`;
 - `src-tauri/tauri.conf.json` → top-level `version`.
 
+The native bridge has its own SemVer because unchanged app releases should not
+force an MCP-client restart. Bump `src-tauri/mcp-bridge/Cargo.toml` and its lock
+entry together only when the bridge code or its runtime contract changes. The
+release workflow compares bridge binary inputs with the preceding version tag
+and fails if they changed without a bridge-version bump.
+
 The following local check mirrors the workflow's version gate:
 
 ```bash
@@ -148,6 +154,8 @@ const packageLock = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
 const tauri = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8"));
 const cargoToml = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
 const cargoLock = fs.readFileSync("src-tauri/Cargo.lock", "utf8");
+const bridgeCargoToml = fs.readFileSync("src-tauri/mcp-bridge/Cargo.toml", "utf8");
+const bridgeCargoLockText = fs.readFileSync("src-tauri/mcp-bridge/Cargo.lock", "utf8");
 const actual = {
   package: packageJson.version,
   packageLock: packageLock.version,
@@ -158,8 +166,17 @@ const actual = {
     /\[\[package\]\]\nname = "harbor"\nversion = "([^"]+)"/,
   )?.[1],
 };
+const bridgeCargo = bridgeCargoToml.match(/^version = "([^"]+)"/m)?.[1];
+const bridgeCargoLock = bridgeCargoLockText.match(
+  /\[\[package\]\]\nname = "harbor-mcp-bridge"\nversion = "([^"]+)"/,
+)?.[1];
 console.table(actual);
-if (Object.values(actual).some((value) => value !== process.env.VERSION)) {
+console.table({ bridgeCargo, bridgeCargoLock });
+if (
+  Object.values(actual).some((value) => value !== process.env.VERSION) ||
+  !bridgeCargo ||
+  bridgeCargo !== bridgeCargoLock
+) {
   process.exit(1);
 }
 NODE
@@ -170,19 +187,21 @@ before creating the tag:
 
 ```bash
 npm ci
+npm run prepare:bridge
 npm test
 npm run build
+npm run test:rust
 
-(
-  cd src-tauri
-  cargo fmt --all -- --check
-  cargo clippy --locked --all-targets -- -D warnings
-  cargo test --locked
-)
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo fmt --manifest-path src-tauri/mcp-bridge/Cargo.toml --all -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+cargo clippy --manifest-path src-tauri/mcp-bridge/Cargo.toml --locked --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/mcp-bridge/Cargo.toml --locked
 
 git diff --check
 git add package.json package-lock.json \
-  src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
+  src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json \
+  src-tauri/mcp-bridge/Cargo.toml src-tauri/mcp-bridge/Cargo.lock
 git commit -m "chore: release Harbor v${VERSION}"
 git push origin main
 test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
@@ -206,17 +225,22 @@ gh run watch "$RUN_ID" --exit-status --interval 10
 
 If the run does not appear after three seconds, rerun the `RUN_ID=...` command.
 Tags not reachable from `origin/main` are rejected. The workflow runs the full
-frontend and Rust test suites, builds a universal app, signs and notarizes the
-app and DMG, and creates a **draft** GitHub Release containing:
+frontend and both Rust crates' test suites, builds the native bridge for Intel
+and Apple Silicon, combines it into one universal Tauri `externalBin`, then
+builds, signs, and notarizes the universal app and DMG. It creates a **draft**
+GitHub Release containing:
 
 - `Harbor_<version>_universal.dmg` for manual installation;
 - `Harbor_<version>_universal.app.tar.gz` and `.sig` for in-app updates;
 - `latest.json`, mapping both Intel and Apple Silicon Macs to the universal
   updater artifact.
 
-The final workflow step downloads the draft updater archive and checks its
-signature, Apple signature, Gatekeeper acceptance, and notarization ticket. If
-the run fails, do not publish the draft.
+The final workflow steps verify that the embedded bridge contains both
+architectures and has a valid code signature, copy it outside `Harbor.app` and
+verify that standalone signature, then download the draft updater archive and
+repeat the bridge checks alongside the updater signature, Apple signature,
+Gatekeeper acceptance, and notarization-ticket checks. If the run fails, do not
+publish the draft.
 
 ### 5.3 Inspect and publish the draft
 
@@ -338,14 +362,23 @@ xcrun stapler validate /path/to/Harbor.app
 A normal local package does not need the updater private key:
 
 ```bash
+npm run prepare:bridge
 npm run tauri:build:local
 ```
 
 That override disables updater artifact creation while retaining the normal
-app/DMG bundle. It does not disable the runtime updater: the packaged app is a
-production build and checks Harbor's public feed when launched. Use
-`npm run tauri dev` when you need a development session without automatic
-update checks.
+app/DMG bundle and native bridge. It does not disable the runtime updater: the
+packaged app is a production build and checks Harbor's public feed when launched.
+For a development session without automatic update checks, run:
+
+```bash
+npm run prepare:bridge
+npm run tauri dev
+```
+
+Tauri's before-dev and before-build hooks also run `prepare:bridge`; invoking it
+explicitly makes the required sidecar preparation visible and fails early when
+a Rust target is unavailable.
 
 To reproduce the signed app and updater artifacts locally, load both signing
 systems:
@@ -353,6 +386,8 @@ systems:
 With the cert in your login keychain:
 
 ```bash
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
 export APPLE_SIGNING_IDENTITY="Developer ID Application: Faba Development LLC (M58C5Q8BJC)"
 export APPLE_ID="you@example.com"
 export APPLE_PASSWORD="abcd-efgh-ijkl-mnop"
@@ -361,18 +396,39 @@ export TAURI_SIGNING_PRIVATE_KEY="$(<~/.tauri/harbor-updater.key)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(security find-generic-password \
   -a "$USER" -s 'Harbor Updater Signing' -w)"
 
-npm run tauri -- build --target universal-apple-darwin
+HARBOR_BUILD_UNIVERSAL_BRIDGE=1 HARBOR_BRIDGE_PROFILE=release \
+  npm run prepare:bridge
+npm run tauri:build:universal
 ```
 
-Tauri signs, notarizes, and staples `Harbor.app` before creating the DMG, but the
-finished outer DMG still needs its own submission and stapling pass to reproduce
-the release workflow:
+The preparation script cross-builds `harbor-mcp-bridge` for arm64 and x86_64,
+uses `lipo` to create the target-suffixed universal binary expected by Tauri's
+`externalBin`, and verifies both slices. Tauri then signs the sidecar as nested
+code, notarizes and staples `Harbor.app`, and creates the DMG. Reproduce the
+release workflow's embedded and standalone sidecar checks before submitting the
+finished outer DMG for its own notarization and stapling pass:
 
 ```bash
 VERSION="$(node -p 'require("./package.json").version')"
 DMG="src-tauri/target/universal-apple-darwin/release/bundle/dmg/Harbor_${VERSION}_universal.dmg"
+APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/Harbor.app"
+BRIDGE="$APP/Contents/MacOS/harbor-mcp-bridge"
 
 test -f "$DMG"
+test -x "$BRIDGE"
+/usr/bin/lipo "$BRIDGE" -verify_arch arm64 x86_64
+codesign --verify --strict --verbose=2 "$BRIDGE"
+test "$(codesign -dv --verbose=4 "$BRIDGE" 2>&1 | sed -n 's/^TeamIdentifier=//p')" = \
+  "$APPLE_TEAM_ID"
+BRIDGE_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' \
+  src-tauri/mcp-bridge/Cargo.toml | head -n 1)"
+test "$("$BRIDGE" --version)" = "harbor-mcp-bridge $BRIDGE_VERSION"
+STANDALONE_BRIDGE="$(mktemp -d)/harbor-mcp-bridge"
+cp "$BRIDGE" "$STANDALONE_BRIDGE"
+chmod 700 "$STANDALONE_BRIDGE"
+codesign --verify --strict --verbose=2 "$STANDALONE_BRIDGE"
+test "$("$STANDALONE_BRIDGE" --version)" = "harbor-mcp-bridge $BRIDGE_VERSION"
+
 xcrun notarytool submit "$DMG" \
   --apple-id "$APPLE_ID" \
   --password "$APPLE_PASSWORD" \
@@ -449,39 +505,65 @@ Harbor's Streamable-HTTP server is part of the signed app and binds only to
 loopback. During startup it reserves the selected socket before the UI and agent
 configuration advertise it, eliminating the old port check/bind race.
 
-- Harbor's one-click setup for Codex, Claude Code, and Claude Desktop writes an
-  owner-only launcher beside `mcp.json`. The launcher reads the current protected
-  port/per-launch token at each client start, opens Harbor quietly if needed,
-  and then runs the pinned `mcp-remote@0.1.38` adapter. Native HTTP configuration remains
-  available for advanced/manual setups, but requires Harbor to be open and must
-  be refreshed after each Harbor restart.
+- Harbor bundles a signed Rust stdio bridge through Tauri's `externalBin`
+  mechanism. Every Harbor launch checks its independent bridge version and, when
+  missing or newer, atomically installs the bundled executable at
+  `~/Library/Application Support/com.harbor.desktop/harbor-mcp-bridge` with mode
+  `0700`. Renaming over the old inode lets an existing process finish normally;
+  every future client process receives the current signed code. An app release
+  that merely re-signs unchanged bridge v1.x bytes leaves the installed inode and
+  running clients alone.
+- Harbor's one-click setup for Codex, Claude Code, and Claude Desktop writes only
+  that stable command path. New client entries contain no port, bearer token,
+  environment variables, runtime dependency, or download step.
+- The client owns the bridge's stdio lifetime. Before forwarding client messages,
+  the bridge re-reads the owner-only `mcp.json`, follows Harbor's current instance,
+  port, and token, and verifies that the loopback listener belongs to the current
+  macOS user and answers Harbor's authenticated health check. HTTP proxies and
+  redirects are disabled so descriptor credentials cannot leave loopback.
+- If no healthy backend exists, the bridge opens the signed Harbor executable as
+  a background service and waits for a valid descriptor. It keeps the same stdio
+  session alive if startup fails, allowing a later request to recover.
+- When Harbor quits and reopens, its instance identity, token, and possibly port
+  change. The bridge reinitializes the new HTTP backend with the client's saved
+  MCP lifecycle state before forwarding the next request. It does not replay an
+  operation after an ambiguous post-send failure, avoiding duplicate destructive
+  tool calls.
 - Harbor is single-instance: launching it again focuses the existing window
   instead of allowing two processes to race the endpoint descriptor.
 - App data is `0700`; `mcp.json`, registry/run state, agent configs, and Harbor's
   safety backups are written atomically as `0600`.
-- AI connections recognizes Harbor's current managed launcher configuration,
+- AI connections recognizes Harbor's current managed bridge configuration,
   not merely an entry named `harbor`. It reports configuration separately from
-  an observed **Bridge running** process and flags clients that predate the
-  current config or per-launch endpoint descriptor. A bridge process alone does
-  not claim that the host accepted every tool schema.
+  an observed **Bridge running** process and flags a process older than the
+  installed bridge binary. A bridge process alone does not claim that the host
+  accepted every tool schema.
 
-The current restart-safe bridge used by Claude Code, Claude Desktop, and Codex
-still needs Node/npx and may need network on its first run. Manual native HTTP
-configuration avoids that dependency but requires Harbor to be open and the
-client entry to match its current port. A future fully offline release should
-replace the bridge with a signed Rust stdio sidecar bundled inside `Harbor.app`;
-see `ROADMAP.md`.
+The stable app-support command is the same path used by v0.4.2's shell launcher,
+so installing this release migrates existing Claude and Codex configurations in
+place. Those existing clients need one final full restart to replace the legacy
+process with the native bridge. After that, quitting or reopening Harbor and
+rotating its token or port do not require a client restart. A Harbor update that
+changes the bridge binary still requires a client restart for an already-running
+MCP host to load the new code.
+
+Manual native HTTP configuration remains available for advanced setups. It is
+tied to the current launch's port and bearer token and therefore does not receive
+background startup or reconnect behavior.
 
 For any release that changes MCP schemas, transport, authentication, or the
-launcher, run the release candidate with one-click client setup already present,
-fully restart Claude Desktop or start a fresh Codex session, and execute:
+native bridge, run the release candidate with one-click client setup already
+present, fully restart Claude Desktop or start a fresh Codex session, and
+execute:
 
 ```bash
-node scripts/mcp-bridge-soak.mjs --duration-ms 90000 --interval-ms 30000
+node scripts/mcp-bridge-soak.mjs --restart-harbor --duration-ms 90000 --interval-ms 30000
 ```
 
-The harness uses the exact installed stdio launcher, validates the complete tool
+The harness uses the exact installed stdio bridge, validates the complete tool
 catalog against Claude Desktop's object-schema requirement, and calls the
 read-only `list_apps` tool immediately and after 30, 60, and 90 seconds. Do not
-publish unless it ends with `PASS` and emits no schema, authentication, SSE, or
-reconnect errors.
+publish unless it ends with `PASS` and emits no schema, authentication,
+transport, or reconnect errors. The restart checkpoint cleanly quits Harbor
+itself and proves that the same bridge process recovers and completes the next
+call against the new backend.

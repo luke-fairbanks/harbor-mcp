@@ -23,6 +23,7 @@ use tauri::Manager;
 
 /// Default preferred port for the MCP server (DESIGN.md §3.2).
 const DEFAULT_MCP_PORT: u16 = 7777;
+const NATIVE_MCP_BRIDGE_VERSION: &str = env!("HARBOR_MCP_BRIDGE_VERSION");
 
 fn new_token() -> String {
     // 64 hex chars (~244 bits) — ample for a localhost bearer token.
@@ -33,12 +34,34 @@ fn new_token() -> String {
     )
 }
 
+fn current_process_started_at() -> Option<String> {
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-o", "lstart=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let value = String::from_utf8(output.stdout).ok()?;
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let background_service = std::env::args_os().any(|arg| arg == "--background-service");
     tauri::Builder::default()
         // This must be the first plugin registered so duplicate launches are
         // intercepted before any other plugin initialization can run.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if args.iter().any(|arg| arg == "--background-service") {
+                return;
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
@@ -58,7 +81,7 @@ pub fn run() {
                 .with_denylist(&[tray::TRAY_LABEL])
                 .build(),
         )
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
 
             // --- app data dir + config store ---
@@ -66,6 +89,23 @@ pub fn run() {
             // Shared with the supervisor, which persists/reads `runs.json` to
             // re-adopt servers left running by a previous session.
             let store = Arc::new(Store::new(&data_dir));
+
+            // Tauri signs this bundled sidecar as standalone nested code. Copy
+            // it to the stable app-support command already used by every MCP
+            // client. Atomic replacement migrates the old shell/npx launcher
+            // without rewriting users' Claude or Codex configuration.
+            let app_executable = std::env::current_exe().ok();
+            if let Some(source) = app_executable
+                .as_deref()
+                .and_then(std::path::Path::parent)
+                .map(|dir| dir.join("harbor-mcp-bridge"))
+            {
+                if let Err(error) = store.install_bridge_from(&source, NATIVE_MCP_BRIDGE_VERSION) {
+                    eprintln!("[harbor] native MCP bridge install failed: {error}");
+                }
+            } else {
+                eprintln!("[harbor] native MCP bridge install failed: app path unavailable");
+            }
 
             // --- registry: an empty first run enters folder onboarding ---
             let registry = store.load_registry()?.apps;
@@ -81,8 +121,15 @@ pub fn run() {
                 .map(|settings| settings.port)
                 .unwrap_or(DEFAULT_MCP_PORT);
             let mut mcp = McpSettings {
+                schema_version: 1,
+                instance_id: uuid::Uuid::new_v4().to_string(),
+                pid: std::process::id(),
+                process_started_at: current_process_started_at(),
                 token: new_token(),
                 port: preferred_port,
+                app_executable: app_executable
+                    .as_deref()
+                    .map(|path| path.to_string_lossy().into_owned()),
             };
             let (live_port, mcp_listener) = mcp::bind_listener(mcp.port)?;
             if live_port != mcp.port {
@@ -90,9 +137,8 @@ pub fn run() {
             }
             store.save_settings(&mcp)?;
             eprintln!(
-                "[harbor] MCP server → http://127.0.0.1:{}/mcp (token {}…)",
-                mcp.port,
-                &mcp.token[..8.min(mcp.token.len())]
+                "[harbor] authenticated MCP server → http://127.0.0.1:{}/mcp",
+                mcp.port
             );
 
             // --- shared state, reachable from commands AND the MCP server ---
@@ -161,8 +207,10 @@ pub fn run() {
 
             // Window is created hidden (config `visible: false`) to avoid the
             // transparent-window white flash; reveal once setup is done.
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
+            if !background_service {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                }
             }
 
             Ok(())

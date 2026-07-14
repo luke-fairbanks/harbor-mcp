@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 
 /**
- * Exercise the exact stdio launcher installed for Claude Desktop and Codex.
+ * Exercise the exact native stdio bridge installed for Claude Desktop, Claude
+ * Code, and Codex.
  *
  * The test intentionally has no MCP SDK dependency. It speaks newline-delimited
  * JSON-RPC over stdio just like a desktop MCP host, validates the advertised
  * tool schemas against Claude Desktop's stricter expectations, and repeats
- * read-only calls long enough to cross the bridge's stream/reconnect window.
+ * read-only calls long enough to prove the bridge stays healthy over time.
  *
  * Usage:
  *   node scripts/mcp-bridge-soak.mjs --duration-ms 75000 --interval-ms 30000
+ *   node scripts/mcp-bridge-soak.mjs --restart-harbor
  *
  * Optional environment overrides:
- *   HARBOR_BRIDGE, HARBOR_SETTINGS, HARBOR_NPX
+ *   HARBOR_BRIDGE, HARBOR_SETTINGS
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -38,6 +40,7 @@ const requestTimeoutMs = Math.max(
   1,
   numberArg("--request-timeout-ms", 15_000),
 );
+const restartHarbor = process.argv.includes("--restart-harbor");
 const supportDir = join(
   homedir(),
   "Library",
@@ -49,32 +52,69 @@ const settings = process.env.HARBOR_SETTINGS ?? join(supportDir, "mcp.json");
 const startedAt = Date.now();
 const stamp = () => `${((Date.now() - startedAt) / 1_000).toFixed(3)}s`;
 
-async function configuredNpx() {
-  if (process.env.HARBOR_NPX) return process.env.HARBOR_NPX;
+const sleep = (duration) =>
+  new Promise((resolve) => setTimeout(resolve, duration));
 
-  const claudeConfig = join(
-    homedir(),
-    "Library",
-    "Application Support",
-    "Claude",
-    "claude_desktop_config.json",
-  );
+async function readDescriptorSnapshot() {
+  let descriptor;
   try {
-    const config = JSON.parse(await readFile(claudeConfig, "utf8"));
-    const configured = config?.mcpServers?.harbor?.env?.HARBOR_NPX;
-    if (typeof configured === "string" && configured.length > 0) return configured;
+    descriptor = JSON.parse(await readFile(settings, "utf8"));
   } catch {
-    // Fall through to the login-shell lookup when Claude is not configured.
+    throw new Error("could not read Harbor's endpoint descriptor");
   }
+  if (
+    !descriptor ||
+    typeof descriptor !== "object" ||
+    typeof descriptor.token !== "string" ||
+    descriptor.token.length < 16
+  ) {
+    throw new Error("Harbor's endpoint descriptor is invalid");
+  }
+  return {
+    instanceId:
+      typeof descriptor.instanceId === "string" ? descriptor.instanceId : "",
+    pid:
+      Number.isSafeInteger(descriptor.pid) && descriptor.pid > 0
+        ? descriptor.pid
+        : 0,
+    token: descriptor.token,
+  };
+}
 
-  const lookup = spawnSync("/bin/zsh", ["-lc", "command -v npx"], {
-    encoding: "utf8",
-  });
-  const detected = lookup.stdout.trim();
-  if (lookup.status !== 0 || !detected) {
-    throw new Error("could not resolve npx; set HARBOR_NPX to its absolute path");
+function processIsRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
   }
-  return detected;
+}
+
+async function waitForProcessExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (processIsRunning(pid)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Harbor pid ${pid} did not exit after a clean quit request`);
+    }
+    await sleep(100);
+  }
+}
+
+async function waitForDescriptorChange(previous, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let latest;
+  while (Date.now() < deadline) {
+    try {
+      latest = await readDescriptorSnapshot();
+      if (latest.instanceId && latest.instanceId !== previous.instanceId) {
+        return latest;
+      }
+    } catch {
+      // Harbor may be replacing the descriptor atomically while it starts.
+    }
+    await sleep(100);
+  }
+  throw new Error("Harbor restarted without publishing a new instance identity");
 }
 
 function findBooleanSchema(value, path = "schema") {
@@ -160,42 +200,78 @@ function assertClaudeCompatibleTools(tools) {
 async function main() {
   await access(bridge, fsConstants.X_OK);
   await access(settings, fsConstants.R_OK);
-  const npx = await configuredNpx();
-  await access(npx, fsConstants.X_OK);
+  const initialDescriptor = await readDescriptorSnapshot();
+  if (
+    !restartHarbor &&
+    (initialDescriptor.pid <= 0 || !processIsRunning(initialDescriptor.pid))
+  ) {
+    throw new Error(
+      "Start Harbor before the non-mutating soak; use --restart-harbor to test recovery",
+    );
+  }
+  const protectedSecrets = new Set();
+  const rememberDescriptor = (descriptor) => {
+    protectedSecrets.add(descriptor.token);
+    protectedSecrets.add(descriptor.token.slice(0, 12));
+  };
+  rememberDescriptor(initialDescriptor);
 
-  console.log(`[${stamp()}] launcher=${bridge}`);
+  console.log(`[${stamp()}] native bridge=${bridge}`);
   console.log(`[${stamp()}] settings=${settings}`);
-  console.log(`[${stamp()}] npx=${npx}`);
+
+  // Preserve the normal process environment, but do not pass legacy or test
+  // HARBOR_* controls into the production bridge. Its only override is the
+  // protected descriptor path used by the installed client configurations.
+  const bridgeEnv = Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !name.startsWith("HARBOR_")),
+  );
+  bridgeEnv.HARBOR_SETTINGS = settings;
 
   const child = spawn(bridge, [], {
-    detached: true,
-    env: {
-      ...process.env,
-      HARBOR_SETTINGS: settings,
-      HARBOR_NPX: npx,
-    },
+    env: bridgeEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  const bridgePid = child.pid;
+  if (!Number.isSafeInteger(bridgePid) || bridgePid <= 0) {
+    throw new Error("native bridge did not start with a valid process id");
+  }
+  console.log(`[${stamp()}] bridge pid=${bridgePid}`);
+
   const pending = new Map();
+  let bridgeStdout = "";
   let bridgeStderr = "";
+  let stdoutProtocolErrors = 0;
   let nextId = 0;
+  let restartedHarborPid = 0;
   let exited;
+  let closed = false;
 
   const exitPromise = new Promise((resolve) => {
     child.once("exit", (code, signal) => {
       exited = { code, signal };
       for (const request of pending.values()) {
+        clearTimeout(request.timer);
         request.reject(new Error(`bridge exited (${code ?? signal})`));
       }
       pending.clear();
       resolve();
     });
   });
+  const closePromise = new Promise((resolve) => {
+    child.once("close", () => {
+      closed = true;
+      resolve();
+    });
+  });
+
+  child.stdout.on("data", (buffer) => {
+    bridgeStdout += buffer.toString();
+  });
 
   child.stderr.on("data", (buffer) => {
-    const message = buffer.toString();
-    bridgeStderr += message;
-    process.stderr.write(`[bridge ${stamp()}] ${message}`);
+    // Capture, but never echo, bridge stderr. The assertions below prove it is
+    // sanitized before the harness reports even aggregate information about it.
+    bridgeStderr += buffer.toString();
   });
 
   readline.createInterface({ input: child.stdout }).on("line", (line) => {
@@ -203,28 +279,79 @@ async function main() {
     try {
       message = JSON.parse(line);
     } catch {
-      process.stderr.write(`[bridge stdout ${stamp()}] ${line}\n`);
+      stdoutProtocolErrors += 1;
+      return;
+    }
+    if (!message || typeof message !== "object" || message.jsonrpc !== "2.0") {
+      stdoutProtocolErrors += 1;
       return;
     }
     if (!("id" in message) || !pending.has(message.id)) return;
     const request = pending.get(message.id);
     pending.delete(message.id);
     clearTimeout(request.timer);
-    if (message.error) request.reject(new Error(JSON.stringify(message.error)));
-    else request.resolve(message.result);
+    if (message.error) {
+      const code = Number.isSafeInteger(message.error.code)
+        ? message.error.code
+        : "unknown";
+      request.reject(new Error(`${request.method} failed with JSON-RPC code ${code}`));
+    } else request.resolve(message.result);
   });
 
-  function request(method, params) {
+  function assertBridgePid() {
+    if (child.pid !== bridgePid || exited || !processIsRunning(bridgePid)) {
+      throw new Error(`native bridge pid ${bridgePid} did not remain running`);
+    }
+  }
+
+  function assertNoCredentialLeaks() {
+    for (const [stream, output] of [
+      ["stdout", bridgeStdout],
+      ["stderr", bridgeStderr],
+    ]) {
+      for (const secret of protectedSecrets) {
+        if (secret && output.includes(secret)) {
+          throw new Error(`native bridge exposed descriptor credentials on ${stream}`);
+        }
+      }
+    }
+  }
+
+  function assertNativeTransportOutput() {
+    if (stdoutProtocolErrors > 0) {
+      throw new Error(
+        `native bridge emitted ${stdoutProtocolErrors} non-JSON-RPC stdout line(s)`,
+      );
+    }
+    const transportErrors = bridgeStderr.match(
+      /Harbor MCP bridge (?:could not initialize securely|lost its input stream)\.?/gi,
+    );
+    if (transportErrors) {
+      throw new Error(
+        `native bridge emitted ${transportErrors.length} transport error(s)`,
+      );
+    }
+  }
+
+  function request(method, params, timeoutMs = requestTimeoutMs) {
     if (exited) return Promise.reject(new Error(`bridge exited (${exited.code})`));
     const id = nextId;
     nextId += 1;
-    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`${method} timed out after ${requestTimeoutMs}ms`));
-      }, requestTimeoutMs);
-      pending.set(id, { resolve, reject, timer });
+        reject(new Error(`${method} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      pending.set(id, { method, resolve, reject, timer });
+      child.stdin.write(
+        `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
+        (error) => {
+          if (!error || !pending.has(id)) return;
+          pending.delete(id);
+          clearTimeout(timer);
+          reject(new Error(`could not write ${method} to the native bridge`));
+        },
+      );
     });
   }
 
@@ -232,19 +359,79 @@ async function main() {
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
   }
 
-  async function readOnlyCheckpoint(label) {
-    const catalog = await request("tools/list", {});
+  async function readOnlyCheckpoint(label, timeoutMs = requestTimeoutMs) {
+    assertBridgePid();
+    rememberDescriptor(await readDescriptorSnapshot());
+    assertNoCredentialLeaks();
+    const catalog = await request("tools/list", {}, timeoutMs);
     assertClaudeCompatibleTools(catalog?.tools);
     if (!catalog.tools.some((tool) => tool.name === "list_apps")) {
       throw new Error(`${label} catalog does not contain list_apps`);
     }
-    const call = await request("tools/call", {
-      name: "list_apps",
-      arguments: {},
-    });
+    rememberDescriptor(await readDescriptorSnapshot());
+    assertNoCredentialLeaks();
+    const call = await request(
+      "tools/call",
+      {
+        name: "list_apps",
+        arguments: {},
+      },
+      timeoutMs,
+    );
     if (call?.isError) throw new Error(`${label} list_apps returned isError=true`);
+    rememberDescriptor(await readDescriptorSnapshot());
+    assertNoCredentialLeaks();
+    assertBridgePid();
     console.log(
       `[${stamp()}] ${label}: list_apps ok; ${catalog.tools.length} Claude-compatible tools`,
+    );
+  }
+
+  async function restartCheckpoint() {
+    if (process.platform !== "darwin") {
+      throw new Error("--restart-harbor is supported only on macOS");
+    }
+
+    const previous = await readDescriptorSnapshot();
+    rememberDescriptor(previous);
+    if (!previous.instanceId || previous.pid <= 0) {
+      throw new Error(
+        "--restart-harbor requires Harbor's reconnecting endpoint descriptor",
+      );
+    }
+    if (!processIsRunning(previous.pid)) {
+      throw new Error(`Harbor descriptor pid ${previous.pid} is not running`);
+    }
+    assertNoCredentialLeaks();
+    assertBridgePid();
+
+    const quit = spawnSync(
+      "/usr/bin/osascript",
+      ["-e", 'tell application id "com.harbor.desktop" to quit'],
+      { encoding: "utf8", shell: false, timeout: 10_000 },
+    );
+    if (quit.error || quit.status !== 0) {
+      throw new Error("macOS could not request a clean Harbor quit");
+    }
+    console.log(`[${stamp()}] clean quit requested for Harbor pid=${previous.pid}`);
+    await waitForProcessExit(previous.pid, 15_000);
+    assertBridgePid();
+
+    const reconnectTimeoutMs = Math.max(requestTimeoutMs, 30_000);
+    await readOnlyCheckpoint("after Harbor restart", reconnectTimeoutMs);
+    const current = await waitForDescriptorChange(previous, reconnectTimeoutMs);
+    rememberDescriptor(current);
+    if (current.instanceId === previous.instanceId) {
+      throw new Error("Harbor instance identity did not change after restart");
+    }
+    if (current.pid <= 0 || !processIsRunning(current.pid)) {
+      throw new Error("Harbor published a new instance that is not running");
+    }
+    restartedHarborPid = current.pid;
+    assertNoCredentialLeaks();
+    assertBridgePid();
+    console.log(
+      `[${stamp()}] reconnect ok; Harbor pid=${current.pid}; bridge pid=${bridgePid} unchanged`,
     );
   }
 
@@ -265,36 +452,31 @@ async function main() {
     notify("notifications/initialized");
 
     await readOnlyCheckpoint("immediate");
+    if (restartHarbor) await restartCheckpoint();
     const soakStartedAt = Date.now();
     let checkpoint = intervalMs;
     while (checkpoint < durationMs) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, soakStartedAt + checkpoint - Date.now()),
-      );
+      await sleep(Math.max(0, soakStartedAt + checkpoint - Date.now()));
       await readOnlyCheckpoint(`+${checkpoint}ms`);
       checkpoint += intervalMs;
     }
     if (durationMs > 0) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, soakStartedAt + durationMs - Date.now()),
-      );
+      await sleep(Math.max(0, soakStartedAt + durationMs - Date.now()));
       await readOnlyCheckpoint(`+${durationMs}ms`);
     }
-    const transportErrors = bridgeStderr.match(
-      /SSE stream disconnected|Failed to (?:open|reconnect) SSE|Maximum reconnection attempts|HTTP 401/gi,
-    );
-    if (transportErrors) {
-      throw new Error(`bridge emitted ${transportErrors.length} stream/auth/reconnect error(s)`);
-    }
-    console.log(`[${stamp()}] PASS`);
   } catch (error) {
     failure = error;
-    console.error(`[${stamp()}] FAIL: ${error.message}`);
   } finally {
     child.stdin.end();
     if (!exited) {
+      await Promise.race([
+        exitPromise,
+        new Promise((resolve) => setTimeout(resolve, 2_000)),
+      ]);
+    }
+    if (!exited) {
       try {
-        process.kill(-child.pid, "SIGTERM");
+        child.kill("SIGTERM");
       } catch {
         // It may have exited between the check and the signal.
       }
@@ -305,14 +487,65 @@ async function main() {
     }
     if (!exited) {
       try {
-        process.kill(-child.pid, "SIGKILL");
+        child.kill("SIGKILL");
       } catch {
         // It may have exited between the check and the signal.
+      }
+      await Promise.race([
+        exitPromise,
+        new Promise((resolve) => setTimeout(resolve, 2_000)),
+      ]);
+    }
+    if (!closed) {
+      await Promise.race([
+        closePromise,
+        new Promise((resolve) => setTimeout(resolve, 2_000)),
+      ]);
+    }
+    if (!failure && (!exited || exited.code !== 0)) {
+      failure = new Error("native bridge did not exit cleanly after stdin EOF");
+    }
+    if (!failure && !closed) {
+      failure = new Error("native bridge output streams did not close cleanly");
+    }
+    if (
+      restartHarbor &&
+      restartedHarborPid > 0 &&
+      !processIsRunning(restartedHarborPid)
+    ) {
+      failure = new Error("restarted Harbor exited when the bridge input closed");
+    }
+
+    // A restart can rotate the token just before a failure. Remember the
+    // latest value, then inspect all buffered child output one final time.
+    try {
+      rememberDescriptor(await readDescriptorSnapshot());
+    } catch {
+      if (!failure) {
+        failure = new Error("could not verify Harbor's final endpoint descriptor");
+      }
+    }
+    try {
+      assertNoCredentialLeaks();
+    } catch (error) {
+      failure = error;
+    }
+    if (!failure) {
+      try {
+        assertNativeTransportOutput();
+      } catch (error) {
+        failure = error;
       }
     }
   }
 
   if (failure) throw failure;
+  if (bridgeStderr.length > 0) {
+    console.log(
+      `[${stamp()}] bridge stderr sanitized (${Buffer.byteLength(bridgeStderr)} bytes)`,
+    );
+  }
+  console.log(`[${stamp()}] PASS; bridge pid=${bridgePid} remained constant`);
 }
 
 main().catch((error) => {

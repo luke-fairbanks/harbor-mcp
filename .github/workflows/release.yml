@@ -64,6 +64,18 @@ jobs:
           const cargoLock = cargoLockText.match(
             /\[\[package\]\]\nname = "harbor"\nversion = "([^"]+)"/,
           )?.[1];
+          const bridgeCargoText = fs.readFileSync(
+            "src-tauri/mcp-bridge/Cargo.toml",
+            "utf8",
+          );
+          const bridgeCargo = bridgeCargoText.match(/^version = "([^"]+)"/m)?.[1];
+          const bridgeCargoLockText = fs.readFileSync(
+            "src-tauri/mcp-bridge/Cargo.lock",
+            "utf8",
+          );
+          const bridgeCargoLock = bridgeCargoLockText.match(
+            /\[\[package\]\]\nname = "harbor-mcp-bridge"\nversion = "([^"]+)"/,
+          )?.[1];
           const versions = {
             tag,
             package: pkg,
@@ -73,12 +85,56 @@ jobs:
             cargo,
             cargoLock,
           };
-          if (!cargo || !cargoLock || new Set(Object.values(versions)).size !== 1) {
-            console.error("Release version mismatch:", versions);
+          if (
+            !cargo ||
+            !cargoLock ||
+            !bridgeCargo ||
+            !bridgeCargoLock ||
+            bridgeCargo !== bridgeCargoLock ||
+            new Set(Object.values(versions)).size !== 1
+          ) {
+            console.error("Release version mismatch:", {
+              ...versions,
+              bridgeCargo,
+              bridgeCargoLock,
+            });
             process.exit(1);
           }
           console.log(`Release version ${tag} is consistent.`);
           NODE
+
+      - name: Verify native bridge version tracks binary changes
+        run: |
+          previous_tag="$(
+            git tag --merged "$GITHUB_SHA^{commit}" --sort=-v:refname --list 'v*.*.*' \
+              | grep -Fxv "$GITHUB_REF_NAME" \
+              | head -n 1 \
+              || true
+          )"
+          if [ -z "$previous_tag" ] || \
+             ! git cat-file -e "${previous_tag}:src-tauri/mcp-bridge/Cargo.toml" 2>/dev/null
+          then
+            echo "First native bridge release; no prior bridge version to compare."
+            exit 0
+          fi
+
+          current_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' \
+            src-tauri/mcp-bridge/Cargo.toml | head -n 1)"
+          previous_version="$(git show \
+            "${previous_tag}:src-tauri/mcp-bridge/Cargo.toml" \
+            | sed -n 's/^version = "\([^"]*\)"/\1/p' \
+            | head -n 1)"
+          if ! git diff --quiet "${previous_tag}^{commit}" "$GITHUB_SHA^{commit}" -- \
+            src-tauri/mcp-bridge/Cargo.toml \
+            src-tauri/mcp-bridge/Cargo.lock \
+            src-tauri/mcp-bridge/src
+          then
+            if [ "$current_version" = "$previous_version" ]; then
+              echo "::error::Native bridge binary inputs changed since ${previous_tag}, but its version is still ${current_version}."
+              exit 1
+            fi
+          fi
+          echo "Native bridge version ${current_version} is consistent with ${previous_tag}."
 
       - name: Install frontend dependencies
         run: npm ci
@@ -88,6 +144,10 @@ jobs:
           npm test
           npm run build
           node --check scripts/mcp-bridge-soak.mjs
+          node --check scripts/prepare-native-bridge.mjs
+
+      - name: Prepare native MCP bridge for Rust checks
+        run: npm run prepare:bridge
 
       - name: Verify Retina DMG background
         run: |
@@ -102,21 +162,19 @@ jobs:
           test "$dpi_height" = 144.000
 
       - name: Verify Rust formatting
-        working-directory: src-tauri
-        run: cargo fmt --all -- --check
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+          cargo fmt --manifest-path src-tauri/mcp-bridge/Cargo.toml --all -- --check
 
       - name: Lint Rust core
-        working-directory: src-tauri
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: |
+          cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+          cargo clippy --manifest-path src-tauri/mcp-bridge/Cargo.toml --locked --all-targets -- -D warnings
 
       - name: Verify Rust core and MCP tests
-        working-directory: src-tauri
-        run: cargo test --locked
-
-      - name: Verify bundled MCP launcher syntax
         run: |
-          awk '/^const MCP_BRIDGE_SCRIPT:/{on=1; next} on && /^"#;/{exit} on {print}' \
-            src-tauri/src/commands.rs | sh -n
+          cargo test --manifest-path src-tauri/Cargo.toml --locked
+          cargo test --manifest-path src-tauri/mcp-bridge/Cargo.toml --locked
 
       - name: Verify release signing secrets
         env:
@@ -193,6 +251,8 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          HARBOR_BUILD_UNIVERSAL_BRIDGE: "1"
+          HARBOR_BRIDGE_PROFILE: release
         with:
           args: --target universal-apple-darwin
           uploadUpdaterJson: true
@@ -202,6 +262,26 @@ jobs:
           releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: true
           prerelease: false
+
+      - name: Verify signed universal native MCP bridge
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          sidecar="src-tauri/target/universal-apple-darwin/release/bundle/macos/Harbor.app/Contents/MacOS/harbor-mcp-bridge"
+          test -x "$sidecar"
+          /usr/bin/lipo "$sidecar" -verify_arch arm64 x86_64
+          codesign --verify --strict --verbose=2 "$sidecar"
+          team_id="$(codesign -dv --verbose=4 "$sidecar" 2>&1 \
+            | sed -n 's/^TeamIdentifier=//p')"
+          test "$team_id" = "$APPLE_TEAM_ID"
+          bridge_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' \
+            src-tauri/mcp-bridge/Cargo.toml | head -n 1)"
+          test "$("$sidecar" --version)" = "harbor-mcp-bridge $bridge_version"
+          standalone="$(mktemp -d)/harbor-mcp-bridge"
+          cp "$sidecar" "$standalone"
+          chmod 700 "$standalone"
+          codesign --verify --strict --verbose=2 "$standalone"
+          test "$("$standalone" --version)" = "harbor-mcp-bridge $bridge_version"
 
       # Tauri notarizes and staples the app before creating the DMG. Submit the
       # finished DMG as well so Gatekeeper can verify the exact outermost file
@@ -231,6 +311,7 @@ jobs:
       - name: Verify updater metadata
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           version="${GITHUB_REF_NAME#v}"
           dir=$(mktemp -d)
@@ -284,3 +365,18 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           spctl -a -vvv -t execute "$app"
           xcrun stapler validate "$app"
+          sidecar="$app/Contents/MacOS/harbor-mcp-bridge"
+          test -x "$sidecar"
+          /usr/bin/lipo "$sidecar" -verify_arch arm64 x86_64
+          codesign --verify --strict --verbose=2 "$sidecar"
+          team_id="$(codesign -dv --verbose=4 "$sidecar" 2>&1 \
+            | sed -n 's/^TeamIdentifier=//p')"
+          test "$team_id" = "$APPLE_TEAM_ID"
+          bridge_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' \
+            src-tauri/mcp-bridge/Cargo.toml | head -n 1)"
+          test "$("$sidecar" --version)" = "harbor-mcp-bridge $bridge_version"
+          standalone="$dir/harbor-mcp-bridge"
+          cp "$sidecar" "$standalone"
+          chmod 700 "$standalone"
+          codesign --verify --strict --verbose=2 "$standalone"
+          test "$("$standalone" --version)" = "harbor-mcp-bridge $bridge_version"

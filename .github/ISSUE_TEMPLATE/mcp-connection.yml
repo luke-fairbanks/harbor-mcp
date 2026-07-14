@@ -9,7 +9,7 @@ body:
       value: |
         Connection details can contain sensitive values. A small sanitized excerpt is enough.
 
-        > **Protect your privacy:** Do not post tokens, passwords, credentials, `.env` contents, or private filesystem paths. Never paste the full fallback command or connection config; it can contain Harbor's bearer token.
+        > **Protect your privacy:** Do not post tokens, passwords, credentials, `.env` contents, or private filesystem paths. Harbor's automatic native-bridge config contains only a command path, but manual HTTP configs and `mcp.json` contain Harbor's bearer token and must not be pasted.
   - type: input
     id: harbor-version
     attributes:
@@ -63,12 +63,27 @@ body:
       placeholder: Version number or build
     validations:
       required: true
-  - type: input
-    id: node-version
+  - type: dropdown
+    id: client-restarted
     attributes:
-      label: Node.js and npx versions
-      description: Run `node --version` and `npx --version`, or write "not installed."
-      placeholder: node v24.3.0; npx 11.4.2
+      label: Client restart after bridge migration or update
+      description: Migration from the v0.4.2 legacy launcher and a later bridge-binary update each require one full client restart; routine Harbor restarts do not.
+      options:
+        - Fully quit and reopened the client
+        - Did not restart the client
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: harbor-restart
+    attributes:
+      label: Behavior after Harbor quits and reopens
+      description: The native bridge should keep the same client session connected while Harbor restarts and rotates its token or port.
+      options:
+        - Connection survives the Harbor restart
+        - Works until Harbor restarts, then disconnects
+        - Never connects
+        - Not tested
     validations:
       required: true
   - type: textarea
@@ -92,7 +107,7 @@ body:
     id: sanitized-config
     attributes:
       label: Sanitized configuration or logs
-      description: Optional. Replace tokens, usernames, project names, and paths with placeholders before pasting a short excerpt.
+      description: Optional. Include only a short excerpt. Replace tokens, usernames, project names, and paths with placeholders; do not paste `mcp.json`.
       render: shell
   - type: checkboxes
     id: privacy-check

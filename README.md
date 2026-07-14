@@ -93,7 +93,8 @@ or edit a `harbor.json` configuration instead.
   exact registered config. Changing it through MCP requires a new approval.
 - **MCP stays local.** The server binds to `127.0.0.1` and uses a new bearer token
   on every Harbor launch. Its descriptor and Harbor’s app-data directory are
-  owner-only on macOS.
+  owner-only on macOS, and the native bridge verifies listener ownership before
+  forwarding credentials.
 - **Fix with AI is explicit.** When you invoke it, Harbor passes the service
   command, working path, exit state, and recent logs to your installed Codex or
   Claude CLI. That data is then handled under the privacy terms of whichever
@@ -127,16 +128,24 @@ host process.
 ## Connect Claude or Codex
 
 Open **AI connections** and choose **Connect Claude Code**, **Connect Desktop**,
-or **Connect Codex**. The guided setup installs a restart-safe, owner-only
-launcher that follows Harbor’s live endpoint and can quietly open Harbor after
-a reboot. Fully quit and reopen an already-running client after connecting it.
-Harbor distinguishes a saved configuration from an observed **Bridge running**
-process; the latter means the client launched Harbor, while the client's own MCP
-tool list is the final confirmation that it accepted the catalog.
+or **Connect Codex**. The guided setup installs Harbor's signed, owner-only
+native bridge. New client configurations contain only its stable command path:
+no bearer token, environment variables, Node.js installation, or first-run
+download is required. If Harbor is closed, the bridge opens it quietly in the
+background. After connecting for the first time, start a new client session (or
+fully quit and reopen an already-running client) so it loads the new entry.
 
-The launcher currently requires Node.js/npx and may download the pinned
-`mcp-remote@0.1.38` adapter the first time it runs. A bundled bridge that removes
-that dependency is on the [roadmap](./ROADMAP.md).
+The client-owned stdio process stays connected while Harbor quits and reopens.
+It re-reads Harbor's protected endpoint descriptor, follows token and port
+rotations, and replays the MCP backend lifecycle before forwarding the next
+request. Upgrading from Harbor v0.4.2's legacy launcher requires one final client
+restart; normal Harbor restarts after that do not. A later Harbor update that
+replaces the bridge binary itself also requires a client restart before the
+running client can use the new bridge code.
+
+Harbor distinguishes a saved configuration from an observed **Bridge running**
+process; the latter means the client launched the bridge, while the client's own
+MCP tool list is the final confirmation that it accepted the catalog.
 
 Advanced users can connect directly over Streamable HTTP. Read the current port
 and token from
@@ -177,6 +186,7 @@ Harbor uses Tauri 2 with a Rust core and a React 19 / Radix Themes interface.
 
 ```bash
 npm install
+npm run prepare:bridge
 npm run tauri dev
 ```
 
@@ -189,26 +199,29 @@ npm run tauri:build:local
 ### Verify changes
 
 ```bash
+npm run prepare:bridge
 npm test
 npm run build
+npm run test:rust
 
-cd src-tauri
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo fmt --manifest-path src-tauri/mcp-bridge/Cargo.toml --all -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+cargo clippy --manifest-path src-tauri/mcp-bridge/Cargo.toml --locked --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/mcp-bridge/Cargo.toml --locked
 ```
 
-When changing MCP schemas, transport, authentication, or the desktop launcher,
+When changing MCP schemas, transport, authentication, or the native bridge,
 start the patched Harbor build after using one-click setup at least once, then
 exercise the exact installed Claude/Codex bridge for 90 seconds:
 
 ```bash
-node scripts/mcp-bridge-soak.mjs --duration-ms 90000 --interval-ms 30000
+node scripts/mcp-bridge-soak.mjs --restart-harbor --duration-ms 90000 --interval-ms 30000
 ```
 
 The harness performs Claude-compatible initialization, validates all advertised
 tool schemas, and repeatedly calls the read-only `list_apps` tool. It must end
-with `PASS` and no schema, authentication, SSE, or reconnect errors.
+with `PASS` and no schema, authentication, transport, or reconnect errors.
 
 See [DESIGN.md](./DESIGN.md) for the shipped architecture,
 [ROADMAP.md](./ROADMAP.md) for planned work, and

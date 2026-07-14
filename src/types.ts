@@ -103,6 +103,7 @@ export interface McpInfo {
   version: string;
   claudeAddCommand: string;
   desktopJson: string;
+  bridgeCommand: string;
 }
 
 export interface Detection {

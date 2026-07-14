@@ -306,7 +306,7 @@ export function ConnectionsPanel({
 
   const token = reveal ? info.token : "•".repeat(40);
   const mcpHealthy = info.healthy && !infoError;
-  const codexToml = `[mcp_servers.harbor]\nurl = "${info.url}"\nhttp_headers = { Authorization = "Bearer ${info.token}" }\ndefault_tools_approval_mode = "writes"`;
+  const codexToml = `[mcp_servers.harbor]\ncommand = ${JSON.stringify(info.bridgeCommand)}\nstartup_timeout_sec = 45\ndefault_tools_approval_mode = "writes"`;
 
   return (
     <div className="settings connections-page">
@@ -404,8 +404,8 @@ export function ConnectionsPanel({
               </h2>
             </div>
             <p className="connections-section-copy">
-              Connect once, then let each agent discover and manage the same
-              local projects.
+              Connect once. Harbor's native bridge follows restarts, ports, and
+              credentials automatically.
             </p>
           </div>
 
@@ -423,7 +423,7 @@ export function ConnectionsPanel({
                 connection={status.code}
                 available={status.codeCli}
                 unavailableNote="CLI not found"
-                runningHint="Claude Code launched Harbor's bridge. Run /mcp to verify its tool catalog."
+                runningHint="Native bridge running — Harbor can restart without reconnecting. Run /mcp to inspect its tools."
                 configuredHint={
                   "Configuration saved. Start a new Claude Code session to launch Harbor."
                 }
@@ -455,7 +455,7 @@ export function ConnectionsPanel({
                 connection={status.desktop}
                 available={status.desktopInstalled}
                 unavailableNote="App not detected"
-                runningHint="Claude Desktop launched Harbor's MCP bridge."
+                runningHint="Native bridge running — Harbor can restart without restarting Claude."
                 configuredHint={
                   "Configuration saved. Open Claude Desktop to launch Harbor."
                 }
@@ -485,7 +485,7 @@ export function ConnectionsPanel({
                 connection={status.codex}
                 available={status.codexInstalled}
                 unavailableNote="App not detected"
-                runningHint="A running Codex session launched Harbor's MCP bridge."
+                runningHint="Native bridge running — Harbor can restart without starting a new Codex session."
                 configuredHint={
                   "Configuration saved. Start a new Codex session to launch Harbor."
                 }

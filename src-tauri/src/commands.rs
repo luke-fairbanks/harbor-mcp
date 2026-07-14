@@ -10,7 +10,7 @@ use crate::state::AppState;
 use crate::{ops, store};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
@@ -33,6 +33,8 @@ pub struct McpInfo {
     pub claude_add_command: String,
     #[serde(rename = "desktopJson")]
     pub desktop_json: String,
+    #[serde(rename = "bridgeCommand")]
+    pub bridge_command: String,
 }
 
 #[tauri::command]
@@ -320,7 +322,8 @@ pub async fn mcp_info(state: State<'_, Arc<AppState>>) -> Result<McpInfo, String
     .ok()
     .flatten()
     .is_some();
-    Ok(build_mcp_info(&state.mcp.token, port, healthy))
+    let bridge = state.store.bridge_path().to_string_lossy().into_owned();
+    Ok(build_mcp_info(&state.mcp.token, port, healthy, &bridge))
 }
 
 /// Import a shareable `harbor.json`. `path` may be the file itself or the folder
@@ -419,18 +422,6 @@ fn codex_config_path() -> Option<PathBuf> {
     Some(PathBuf::from(base).join("config.toml"))
 }
 
-fn toml_nested_str<'a>(item: Option<&'a toml_edit::Item>, key: &str) -> Option<&'a str> {
-    let item = item?;
-    item.as_inline_table()
-        .and_then(|table| table.get(key))
-        .and_then(|value| value.as_str())
-        .or_else(|| {
-            item.as_table_like()
-                .and_then(|table| table.get(key))
-                .and_then(|value| value.as_str())
-        })
-}
-
 /// Agent configs and their backups can contain unrelated credentials as well as
 /// Harbor's token. Preserve them atomically with owner-only permissions.
 fn write_private_atomic(path: &std::path::Path, text: &str) -> Result<(), String> {
@@ -462,86 +453,53 @@ fn write_private_atomic(path: &std::path::Path, text: &str) -> Result<(), String
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
-const MCP_BRIDGE_SCRIPT: &str = r#"#!/bin/sh
-set -eu
-
-settings="$HARBOR_SETTINGS"
-npx="$HARBOR_NPX"
-# npx installations managed by nvm/asdf often use `#!/usr/bin/env node`.
-# A GUI-launched agent has a minimal PATH, so include npx's own directory.
-npx_dir=${HARBOR_NPX%/*}
-export PATH="$npx_dir:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-port=$(/usr/bin/plutil -extract port raw -o - "$settings")
-token=$(/usr/bin/plutil -extract token raw -o - "$settings")
-export HARBOR_AUTH="Bearer $token"
-
-# A configured agent should work after a reboot without asking the user to
-# remember to open Harbor first. Launch it quietly and wait for its health route.
-listener_owned_by_me() {
-  pid=$(/usr/sbin/lsof -nP "-iTCP:$port" -sTCP:LISTEN -t 2>/dev/null | /usr/bin/head -n 1)
-  [ -n "$pid" ] || return 1
-  owner=$(/bin/ps -o uid= -p "$pid" 2>/dev/null | /usr/bin/tr -d ' ')
-  [ "$owner" = "$(/usr/bin/id -u)" ]
+/// Return Harbor's installed native stdio bridge. The GUI installs this signed
+/// executable at a stable path before any connection command can be invoked.
+fn has_native_executable_header(path: &std::path::Path) -> bool {
+    let mut header = [0_u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .is_ok()
+        && matches!(
+            header,
+            // Mach-O universal/thin, ELF, or PE. Harbor currently ships Mach-O,
+            // while the other headers keep development builds portable.
+            [0xca, 0xfe, 0xba, 0xbe]
+                | [0xca, 0xfe, 0xba, 0xbf]
+                | [0xbe, 0xba, 0xfe, 0xca]
+                | [0xbf, 0xba, 0xfe, 0xca]
+                | [0xcf, 0xfa, 0xed, 0xfe]
+                | [0xfe, 0xed, 0xfa, 0xcf]
+                | [0x7f, b'E', b'L', b'F']
+                | [b'M', b'Z', _, _]
+        )
 }
 
-is_harbor() {
-  listener_owned_by_me || return 1
-  response=$(/usr/bin/curl -fsS --max-time 1 \
-    -H "Authorization: $HARBOR_AUTH" \
-    "http://127.0.0.1:$port/health" 2>/dev/null || true)
-  [ "$response" = "Harbor MCP OK" ]
-}
-
-if ! is_harbor; then
-  /usr/bin/open -gj -a Harbor >/dev/null 2>&1 || true
-  attempts=0
-  while [ "$attempts" -lt 40 ]; do
-    /bin/sleep 0.25
-    port=$(/usr/bin/plutil -extract port raw -o - "$settings")
-    token=$(/usr/bin/plutil -extract token raw -o - "$settings")
-    export HARBOR_AUTH="Bearer $token"
-    if is_harbor; then
-      break
-    fi
-    attempts=$((attempts + 1))
-  done
-fi
-
-if ! is_harbor; then
-  echo "Harbor did not start on a listener owned by this user; refusing to send its MCP token." >&2
-  exit 1
-fi
-
-exec "$npx" -y mcp-remote@0.1.38 \
-  "http://127.0.0.1:$port/mcp" \
-  --header 'Authorization:${HARBOR_AUTH}' \
-  --allow-http \
-  --transport http-only
-"#;
-
-/// Install a stable stdio launcher whose config contains no token or runtime
-/// port. It reads Harbor's protected descriptor whenever an agent starts it.
-fn ensure_mcp_bridge(state: &AppState) -> Result<(String, String, String), String> {
+fn ensure_mcp_bridge(state: &AppState) -> Result<String, String> {
     let bridge = state.store.bridge_path();
-    write_private_atomic(&bridge, MCP_BRIDGE_SCRIPT)?;
+    let metadata = std::fs::symlink_metadata(&bridge).map_err(|_| {
+        "Harbor's native MCP bridge is not installed. Restart Harbor and try again."
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err("Harbor's native MCP bridge path is not a regular file.".to_string());
+    }
+    if !has_native_executable_header(&bridge) {
+        return Err(
+            "Harbor's native MCP bridge has not been installed yet. Restart Harbor and try again."
+                .to_string(),
+        );
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bridge, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err("Harbor's native MCP bridge is not executable.".to_string());
+        }
     }
-    let npx = crate::sysenv::resolve_bin("npx")
-        .ok_or("Node.js/npx is required for the MCP desktop bridge")?
-        .to_string_lossy()
-        .into_owned();
-    Ok((
-        bridge.to_string_lossy().into_owned(),
-        state.store.settings_path().to_string_lossy().into_owned(),
-        npx,
-    ))
+    Ok(bridge.to_string_lossy().into_owned())
 }
 
-fn claude_code_add_args(settings: &str, npx: &str, bridge: &str) -> Vec<String> {
+fn claude_code_add_args(bridge: &str) -> Vec<String> {
     vec![
         "mcp".into(),
         "add".into(),
@@ -550,13 +508,35 @@ fn claude_code_add_args(settings: &str, npx: &str, bridge: &str) -> Vec<String> 
         "user".into(),
         "--transport".into(),
         "stdio".into(),
-        "--env".into(),
-        format!("HARBOR_SETTINGS={settings}"),
-        "--env".into(),
-        format!("HARBOR_NPX={npx}"),
         "--".into(),
         bridge.into(),
     ]
+}
+
+fn json_entry_uses_bridge(
+    entry: &serde_json::Value,
+    expected_bridge: &str,
+    bridge_available: bool,
+) -> bool {
+    bridge_available
+        && entry.get("command").and_then(serde_json::Value::as_str) == Some(expected_bridge)
+}
+
+fn toml_entry_uses_bridge(
+    entry: &toml_edit::Item,
+    expected_bridge: &str,
+    bridge_available: bool,
+) -> bool {
+    let Some(harbor) = entry.as_table_like() else {
+        return false;
+    };
+    let enabled = match harbor.get("enabled") {
+        None => true,
+        Some(value) => value.as_bool() == Some(true),
+    };
+    enabled
+        && bridge_available
+        && harbor.get("command").and_then(toml_edit::Item::as_str) == Some(expected_bridge)
 }
 
 #[derive(Clone, Copy)]
@@ -650,6 +630,13 @@ fn has_ancestor(
     false
 }
 
+fn process_runs_executable(process: &ProcessInfo, executable: &str) -> bool {
+    process
+        .command
+        .strip_prefix(executable)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
 struct ConnectionTarget<'a> {
     configured: bool,
     config_path: Option<&'a std::path::Path>,
@@ -661,9 +648,9 @@ struct ConnectionTarget<'a> {
 fn connection_state(
     target: ConnectionTarget<'_>,
     descriptor_age: Option<std::time::Duration>,
+    bridge_age: Option<std::time::Duration>,
     processes: &[ProcessInfo],
     bridge: &str,
-    endpoint: &str,
 ) -> AgentConnection {
     if !target.configured {
         return AgentConnection::default();
@@ -678,17 +665,45 @@ fn connection_state(
         .iter()
         .map(|process| (process.pid, process.parent))
         .collect::<std::collections::HashMap<_, _>>();
-    let bridge_processes = processes.iter().filter(|process| {
-        let is_bridge = process.command.contains(bridge)
-            || (process.command.contains("mcp-remote") && process.command.contains(endpoint));
-        is_bridge && has_ancestor(process.pid, &roots, &parents)
-    });
-    let mut bridge_found = false;
-    let bridge_running = bridge_processes.fold(false, |current, process| {
-        bridge_found = true;
-        current || descriptor_age.is_some_and(|age| process.age <= age)
-    });
-    let stale_bridge = bridge_found && !bridge_running;
+    let belongs_to_client = |process: &ProcessInfo| has_ancestor(process.pid, &roots, &parents);
+
+    // The native bridge re-reads mcp.json and reconnects in place, so rotating
+    // Harbor's endpoint no longer makes it stale. It only needs a client restart
+    // when Harbor has replaced the executable with a newer bridge build.
+    let native_processes = processes
+        .iter()
+        .filter(|process| belongs_to_client(process) && process_runs_executable(process, bridge))
+        .collect::<Vec<_>>();
+    let native_found = !native_processes.is_empty();
+    let native_running = native_processes
+        .iter()
+        .any(|process| bridge_age.is_some_and(|age| process.age <= age));
+
+    // Recognize the pre-native launcher for a seamless upgrade. That bridge
+    // cached its token/port, so it still predates and is invalidated by a newer
+    // descriptor. The shell parent contains the stable bridge path. After the
+    // script's final `exec`, its path can disappear from `ps`, so also recognize
+    // the old mcp-remote process by its loopback Streamable HTTP target.
+    let legacy_processes = processes
+        .iter()
+        .filter(|process| {
+            let old_remote = process.command.contains("mcp-remote")
+                && process.command.contains("mcp-remote@0.1.38")
+                && process.command.contains("Authorization:${HARBOR_AUTH}")
+                && process.command.contains("http://127.0.0.1:")
+                && process.command.contains("/mcp");
+            belongs_to_client(process)
+                && !process_runs_executable(process, bridge)
+                && (old_remote || (!native_found && process.command.contains(bridge)))
+        })
+        .collect::<Vec<_>>();
+    let legacy_found = !legacy_processes.is_empty();
+    let legacy_running = legacy_processes
+        .iter()
+        .any(|process| descriptor_age.is_some_and(|age| process.age <= age));
+
+    let bridge_running = native_running || legacy_running;
+    let stale_bridge = (native_found && !native_running) || (legacy_found && !legacy_running);
 
     let config_age = target
         .config_path
@@ -721,14 +736,8 @@ fn connection_state(
 
 #[tauri::command]
 pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatus, String> {
-    let expected_url = format!("http://127.0.0.1:{}/mcp", state.mcp.port);
     let expected_bridge = state.store.bridge_path().to_string_lossy().into_owned();
-    let expected_settings = state.store.settings_path().to_string_lossy().into_owned();
-    let expected_npx =
-        crate::sysenv::resolve_bin("npx").map(|path| path.to_string_lossy().into_owned());
-    let bridge_current = std::fs::read_to_string(&expected_bridge)
-        .map(|script| script == MCP_BRIDGE_SCRIPT)
-        .unwrap_or(false);
+    let bridge_current = ensure_mcp_bridge(&state).is_ok();
     let claude = crate::sysenv::resolve_bin("claude");
     let code_cli = claude.is_some();
     let code_config = claude_code_config_path();
@@ -740,23 +749,8 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
                     .get("mcpServers")
                     .and_then(|servers| servers.get("harbor"))
                 {
-                    let npx_matches = expected_npx.as_deref().is_some_and(|expected| {
-                        entry
-                            .get("env")
-                            .and_then(|env| env.get("HARBOR_NPX"))
-                            .and_then(|value| value.as_str())
-                            == Some(expected)
-                    });
-                    let stable_bridge = bridge_current
-                        && entry.get("command").and_then(|value| value.as_str())
-                            == Some(expected_bridge.as_str())
-                        && entry
-                            .get("env")
-                            .and_then(|env| env.get("HARBOR_SETTINGS"))
-                            .and_then(|value| value.as_str())
-                            == Some(expected_settings.as_str())
-                        && npx_matches;
-                    code_configured = stable_bridge;
+                    code_configured =
+                        json_entry_uses_bridge(entry, &expected_bridge, bridge_current);
                 }
             }
         }
@@ -778,25 +772,7 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
                 desktop_configured = v
                     .get("mcpServers")
                     .and_then(|m| m.get("harbor"))
-                    .map(|entry| {
-                        let npx_matches = expected_npx.as_deref().is_some_and(|expected| {
-                            entry
-                                .get("env")
-                                .and_then(|e| e.get("HARBOR_NPX"))
-                                .and_then(|v| v.as_str())
-                                == Some(expected)
-                        });
-                        let has_bridge = bridge_current
-                            && entry.get("command").and_then(|v| v.as_str())
-                                == Some(expected_bridge.as_str())
-                            && entry
-                                .get("env")
-                                .and_then(|e| e.get("HARBOR_SETTINGS"))
-                                .and_then(|v| v.as_str())
-                                == Some(expected_settings.as_str())
-                            && npx_matches;
-                        has_bridge
-                    })
+                    .map(|entry| json_entry_uses_bridge(entry, &expected_bridge, bridge_current))
                     .unwrap_or(false);
             }
         }
@@ -819,23 +795,7 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
                     .get("mcp_servers")
                     .and_then(|t| t.as_table_like())
                     .and_then(|t| t.get("harbor"))
-                    .and_then(|item| item.as_table_like())
-                    .map(|harbor| {
-                        let enabled = match harbor.get("enabled") {
-                            None => true,
-                            Some(value) => value.as_bool() == Some(true),
-                        };
-                        let npx_matches = expected_npx.as_deref().is_some_and(|expected| {
-                            toml_nested_str(harbor.get("env"), "HARBOR_NPX") == Some(expected)
-                        });
-                        let bridge_ok = bridge_current
-                            && harbor.get("command").and_then(|v| v.as_str())
-                                == Some(expected_bridge.as_str())
-                            && toml_nested_str(harbor.get("env"), "HARBOR_SETTINGS")
-                                == Some(expected_settings.as_str())
-                            && npx_matches;
-                        enabled && bridge_ok
-                    })
+                    .map(|entry| toml_entry_uses_bridge(entry, &expected_bridge, bridge_current))
                     .unwrap_or(false);
             }
         }
@@ -843,6 +803,10 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
 
     let processes = process_snapshot();
     let descriptor_age = std::fs::metadata(state.store.settings_path())
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.elapsed().ok());
+    let bridge_age = std::fs::metadata(state.store.bridge_path())
         .ok()
         .and_then(|metadata| metadata.modified().ok())
         .and_then(|modified| modified.elapsed().ok());
@@ -855,9 +819,9 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
             client_name: "Claude Code",
         },
         descriptor_age,
+        bridge_age,
         &processes,
         &expected_bridge,
-        &expected_url,
     );
     let desktop = connection_state(
         ConnectionTarget {
@@ -868,9 +832,9 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
             client_name: "Claude Desktop",
         },
         descriptor_age,
+        bridge_age,
         &processes,
         &expected_bridge,
-        &expected_url,
     );
     let codex = connection_state(
         ConnectionTarget {
@@ -881,9 +845,9 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
             client_name: "Codex",
         },
         descriptor_age,
+        bridge_age,
         &processes,
         &expected_bridge,
-        &expected_url,
     );
 
     Ok(AgentStatus {
@@ -900,11 +864,11 @@ pub async fn agents_status(state: State<'_, Arc<AppState>>) -> Result<AgentStatu
 pub async fn connect_claude_code(state: State<'_, Arc<AppState>>) -> Result<String, String> {
     let bin =
         crate::sysenv::resolve_bin("claude").ok_or("Claude Code CLI (`claude`) not found.")?;
-    let (bridge, settings, npx) = ensure_mcp_bridge(&state)?;
-    let add_args = claude_code_add_args(&settings, &npx, &bridge);
+    let bridge = ensure_mcp_bridge(&state)?;
+    let add_args = claude_code_add_args(&bridge);
     let path = crate::sysenv::enriched_path().unwrap_or_default();
 
-    // Remove any prior entry first so reconnecting refreshes the token/port.
+    // Replace any prior HTTP or Node-backed entry with the stable native bridge.
     let _ = tokio::process::Command::new(&bin)
         .args(["mcp", "remove", "harbor", "--scope", "user"])
         .env("PATH", &path)
@@ -919,7 +883,7 @@ pub async fn connect_claude_code(state: State<'_, Arc<AppState>>) -> Result<Stri
         .map_err(|e| e.to_string())?;
 
     if out.status.success() {
-        Ok("Configured Claude Code with Harbor's restart-safe launcher.".to_string())
+        Ok("Configured Claude Code with Harbor's reconnecting native bridge.".to_string())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
@@ -947,16 +911,12 @@ pub async fn connect_claude_desktop(state: State<'_, Arc<AppState>>) -> Result<S
         );
     }
 
-    // Claude Desktop is stdio-only. Its config points to Harbor's stable
-    // launcher, which reads the protected live endpoint descriptor at startup.
-    let (bridge, settings, npx) = ensure_mcp_bridge(&state)?;
+    // Claude Desktop is stdio-only. Its config points to Harbor's stable native
+    // bridge, which follows protected endpoint descriptor updates in place.
+    let bridge = ensure_mcp_bridge(&state)?;
     let entry = serde_json::json!({
         "command": bridge,
-        "args": [],
-        "env": {
-            "HARBOR_SETTINGS": settings,
-            "HARBOR_NPX": npx
-        }
+        "args": []
     });
 
     let obj = root.as_object_mut().unwrap();
@@ -997,17 +957,9 @@ pub async fn connect_codex(state: State<'_, Arc<AppState>>) -> Result<String, St
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| format!("parsing ~/.codex/config.toml: {e}"))?;
 
-    // Streamable HTTP is stable in current Codex. Remove the old compatibility
-    // flag Harbor used to inject instead of mutating an unrelated global setting.
-    doc.remove("experimental_use_rmcp_client");
-
-    let (bridge, settings, npx) = ensure_mcp_bridge(&state)?;
-    let mut env = toml_edit::InlineTable::new();
-    env.insert("HARBOR_SETTINGS", toml_edit::Value::from(settings));
-    env.insert("HARBOR_NPX", toml_edit::Value::from(npx));
+    let bridge = ensure_mcp_bridge(&state)?;
     let mut tbl = toml_edit::Table::new();
     tbl["command"] = toml_edit::value(bridge);
-    tbl["env"] = toml_edit::value(env);
     tbl["startup_timeout_sec"] = toml_edit::value(45);
     // Current Codex understands MCP tool annotations; prompt for state-changing
     // Harbor tools while allowing inventory/status/log reads without friction.
@@ -1034,7 +986,7 @@ pub async fn connect_codex(state: State<'_, Arc<AppState>>) -> Result<String, St
 
     write_private_atomic(&p, &doc.to_string())?;
     Ok(
-        "Configured Codex with Harbor's restart-safe launcher — restart Codex to load it."
+        "Configured Codex with Harbor's reconnecting native bridge — restart Codex to load it."
             .to_string(),
     )
 }
@@ -1196,14 +1148,25 @@ pub async fn export_app(state: State<'_, Arc<AppState>>, app: String) -> Result<
     Ok(path.to_string_lossy().into_owned())
 }
 
-pub fn build_mcp_info(token: &str, port: u16, healthy: bool) -> McpInfo {
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+pub fn build_mcp_info(token: &str, port: u16, healthy: bool, bridge: &str) -> McpInfo {
     let url = format!("http://127.0.0.1:{port}/mcp");
     let claude_add_command = format!(
-        "claude mcp add harbor --scope user --transport http {url} --header \"Authorization: Bearer {token}\""
+        "claude mcp add harbor --scope user --transport stdio -- {}",
+        shell_single_quote(bridge)
     );
-    let desktop_json = format!(
-        "{{\n  \"mcpServers\": {{\n    \"harbor\": {{\n      \"command\": \"npx\",\n      \"args\": [\"-y\", \"mcp-remote@0.1.38\", \"{url}\", \"--header\", \"Authorization:${{HARBOR_AUTH}}\", \"--allow-http\", \"--transport\", \"http-only\"],\n      \"env\": {{ \"HARBOR_AUTH\": \"Bearer {token}\" }}\n    }}\n  }}\n}}"
-    );
+    let desktop_json = serde_json::to_string_pretty(&serde_json::json!({
+        "mcpServers": {
+            "harbor": {
+                "command": bridge,
+                "args": []
+            }
+        }
+    }))
+    .expect("serializing static MCP configuration cannot fail");
     McpInfo {
         url,
         port,
@@ -1212,6 +1175,7 @@ pub fn build_mcp_info(token: &str, port: u16, healthy: bool) -> McpInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         claude_add_command,
         desktop_json,
+        bridge_command: bridge.to_string(),
     }
 }
 
@@ -1269,9 +1233,9 @@ mod tests {
                 client_name: "Claude Desktop",
             },
             Some(std::time::Duration::from_secs(120)),
+            Some(std::time::Duration::from_secs(120)),
             &processes,
             "/tmp/harbor-mcp-bridge",
-            "http://127.0.0.1:7777/mcp",
         );
         let _ = std::fs::remove_file(config);
         assert!(state.bridge_running);
@@ -1297,9 +1261,9 @@ mod tests {
                 client_name: "Claude Desktop",
             },
             Some(std::time::Duration::from_secs(120)),
+            Some(std::time::Duration::from_secs(120)),
             &processes,
             "/tmp/harbor-mcp-bridge",
-            "http://127.0.0.1:7777/mcp",
         );
         let _ = std::fs::remove_file(config);
         assert!(!state.bridge_running);
@@ -1325,9 +1289,9 @@ mod tests {
                 client_name: "Claude Desktop",
             },
             Some(std::time::Duration::from_secs(120)),
+            Some(std::time::Duration::from_secs(120)),
             &processes,
             "/tmp/harbor-mcp-bridge",
-            "http://127.0.0.1:7777/mcp",
         );
         let _ = std::fs::remove_file(config);
         assert!(!state.restart_required);
@@ -1338,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_older_than_current_descriptor_requires_restart() {
+    fn native_bridge_survives_descriptor_rotation() {
         let config = status_test_config();
         let processes = vec![
             desktop_process(10, 1, 300, "/Applications/Claude.app/Contents/MacOS/Claude"),
@@ -1353,9 +1317,97 @@ mod tests {
                 client_name: "Claude Desktop",
             },
             Some(std::time::Duration::from_secs(60)),
+            Some(std::time::Duration::from_secs(300)),
             &processes,
             "/tmp/harbor-mcp-bridge",
-            "http://127.0.0.1:7777/mcp",
+        );
+        let _ = std::fs::remove_file(config);
+        assert!(state.bridge_running);
+        assert!(!state.restart_required);
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn native_bridge_ignores_client_launcher_wrapper_after_rotation() {
+        let config = status_test_config();
+        let processes = vec![
+            desktop_process(10, 1, 300, "/Applications/Claude.app/Contents/MacOS/Claude"),
+            desktop_process(
+                20,
+                10,
+                180,
+                "/Applications/Claude.app/Contents/Helpers/disclaimer /tmp/harbor-mcp-bridge",
+            ),
+            desktop_process(21, 20, 180, "/tmp/harbor-mcp-bridge"),
+        ];
+        let state = connection_state(
+            ConnectionTarget {
+                configured: true,
+                config_path: Some(&config),
+                kind: AgentKind::ClaudeDesktop,
+                resolved_cli: None,
+                client_name: "Claude Desktop",
+            },
+            Some(std::time::Duration::from_secs(60)),
+            Some(std::time::Duration::from_secs(300)),
+            &processes,
+            "/tmp/harbor-mcp-bridge",
+        );
+        let _ = std::fs::remove_file(config);
+        assert!(state.bridge_running);
+        assert!(!state.restart_required);
+    }
+
+    #[test]
+    fn native_bridge_older_than_installed_binary_requires_restart() {
+        let config = status_test_config();
+        let processes = vec![
+            desktop_process(10, 1, 300, "/Applications/Claude.app/Contents/MacOS/Claude"),
+            desktop_process(20, 10, 180, "/tmp/harbor-mcp-bridge"),
+        ];
+        let state = connection_state(
+            ConnectionTarget {
+                configured: true,
+                config_path: Some(&config),
+                kind: AgentKind::ClaudeDesktop,
+                resolved_cli: None,
+                client_name: "Claude Desktop",
+            },
+            Some(std::time::Duration::from_secs(60)),
+            Some(std::time::Duration::from_secs(30)),
+            &processes,
+            "/tmp/harbor-mcp-bridge",
+        );
+        let _ = std::fs::remove_file(config);
+        assert!(!state.bridge_running);
+        assert!(state.restart_required);
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn legacy_bridge_older_than_descriptor_requires_restart() {
+        let config = status_test_config();
+        let processes = vec![
+            desktop_process(10, 1, 300, "/Applications/Claude.app/Contents/MacOS/Claude"),
+            desktop_process(
+                20,
+                10,
+                175,
+                "npx -y mcp-remote@0.1.38 http://127.0.0.1:7000/mcp --header Authorization:${HARBOR_AUTH}",
+            ),
+        ];
+        let state = connection_state(
+            ConnectionTarget {
+                configured: true,
+                config_path: Some(&config),
+                kind: AgentKind::ClaudeDesktop,
+                resolved_cli: None,
+                client_name: "Claude Desktop",
+            },
+            Some(std::time::Duration::from_secs(60)),
+            Some(std::time::Duration::from_secs(300)),
+            &processes,
+            "/tmp/harbor-mcp-bridge",
         );
         let _ = std::fs::remove_file(config);
         assert!(!state.bridge_running);
@@ -1365,7 +1417,7 @@ mod tests {
 
     #[test]
     fn claude_code_args_keep_name_before_options_and_command_separator() {
-        let args = claude_code_add_args("/tmp/mcp.json", "/opt/node/bin/npx", "/tmp/bridge");
+        let args = claude_code_add_args("/tmp/bridge");
         assert_eq!(
             args,
             vec![
@@ -1376,10 +1428,6 @@ mod tests {
                 "user",
                 "--transport",
                 "stdio",
-                "--env",
-                "HARBOR_SETTINGS=/tmp/mcp.json",
-                "--env",
-                "HARBOR_NPX=/opt/node/bin/npx",
                 "--",
                 "/tmp/bridge",
             ]
@@ -1387,93 +1435,58 @@ mod tests {
     }
 
     #[test]
+    fn legacy_environment_keys_do_not_invalidate_stable_bridge_config() {
+        let json = serde_json::json!({
+            "command": "/tmp/bridge",
+            "env": {
+                "HARBOR_SETTINGS": "/tmp/mcp.json",
+                "HARBOR_NPX": "/opt/node/bin/npx"
+            }
+        });
+        assert!(json_entry_uses_bridge(&json, "/tmp/bridge", true));
+
+        let toml = r#"
+command = "/tmp/bridge"
+env = { HARBOR_SETTINGS = "/tmp/mcp.json", HARBOR_NPX = "/opt/node/bin/npx" }
+"#
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+        assert!(toml_entry_uses_bridge(toml.as_item(), "/tmp/bridge", true));
+    }
+
+    #[test]
+    fn native_bridge_header_rejects_the_legacy_shell_launcher() {
+        let root = std::env::temp_dir().join(format!(
+            "harbor-native-header-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy = root.join("legacy");
+        let native = root.join("native");
+        std::fs::write(&legacy, b"#!/bin/sh\nexec npx mcp-remote\n").unwrap();
+        std::fs::write(&native, [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2]).unwrap();
+        assert!(!has_native_executable_header(&legacy));
+        assert!(has_native_executable_header(&native));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn manual_claude_command_uses_current_cli_order() {
-        let info = build_mcp_info("abc", 7777, true);
+        let info = build_mcp_info("abc", 7777, true, "/tmp/Application Support/bridge");
         assert!(info
             .claude_add_command
             .starts_with("claude mcp add harbor --scope user"));
-    }
-
-    #[test]
-    fn bridge_is_valid_shell_and_gates_token_forwarding() {
-        let status = std::process::Command::new("sh")
-            .args(["-n", "-c", MCP_BRIDGE_SCRIPT])
-            .status()
-            .expect("run sh syntax check");
-        assert!(status.success());
-        assert!(MCP_BRIDGE_SCRIPT.contains("listener_owned_by_me"));
-        assert!(MCP_BRIDGE_SCRIPT.contains("if ! is_harbor; then"));
-        assert!(MCP_BRIDGE_SCRIPT.contains("mcp-remote@0.1.38"));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn bridge_smoke_test_works_with_minimal_environment() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::time::{Duration, Instant};
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        listener.set_nonblocking(true).unwrap();
-        let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(8);
-            let mut served = 0;
-            while served < 2 && Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(1)))
-                            .unwrap();
-                        let mut request = Vec::new();
-                        let mut buf = [0u8; 512];
-                        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                            let count = stream.read(&mut buf).unwrap();
-                            if count == 0 {
-                                break;
-                            }
-                            request.extend_from_slice(&buf[..count]);
-                        }
-                        let request = String::from_utf8_lossy(&request);
-                        assert!(request.contains("Authorization: Bearer smoke-token"));
-                        stream
-                            .write_all(
-                                b"HTTP/1.0 200 OK\r\nContent-Length: 13\r\n\r\nHarbor MCP OK",
-                            )
-                            .unwrap();
-                        served += 1;
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(25));
-                    }
-                    Err(error) => panic!("accepting smoke-test health request: {error}"),
-                }
-            }
-            served
-        });
-
-        let settings = std::env::temp_dir().join(format!(
-            "harbor-bridge-smoke-{}.json",
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::write(
-            &settings,
-            serde_json::json!({ "port": port, "token": "smoke-token" }).to_string(),
-        )
-        .unwrap();
-        let output = std::process::Command::new("/bin/sh")
-            .args(["-c", MCP_BRIDGE_SCRIPT])
-            .env_clear()
-            .env("HARBOR_SETTINGS", &settings)
-            .env("HARBOR_NPX", "/usr/bin/true")
-            .output()
-            .unwrap();
-        let _ = std::fs::remove_file(settings);
-        assert!(
-            output.status.success(),
-            "bridge failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+        assert!(info.claude_add_command.contains("--transport stdio"));
+        assert!(info
+            .claude_add_command
+            .contains("'/tmp/Application Support/bridge'"));
+        assert!(!info.claude_add_command.contains("abc"));
+        assert!(!info.desktop_json.contains("mcp-remote"));
+        assert!(!info.desktop_json.contains("HARBOR_NPX"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&info.desktop_json).unwrap()["mcpServers"]
+                ["harbor"]["command"],
+            "/tmp/Application Support/bridge"
         );
-        assert_eq!(server.join().unwrap(), 2);
     }
 }

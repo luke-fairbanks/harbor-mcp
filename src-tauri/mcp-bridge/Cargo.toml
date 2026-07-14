@@ -1,0 +1,15 @@
+[package]
+name = "harbor-mcp-bridge"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
