@@ -10,6 +10,7 @@ Harbor makes local servers on your Mac understandable—what is running, where i
 came from, and which copies look duplicated. Start a whole project in one click,
 or let Claude or Codex inspect and operate projects you have approved.
 
+[Website](https://luke-fairbanks.github.io/harbor-mcp/) ·
 [**Download Harbor**](https://github.com/luke-fairbanks/harbor-mcp/releases/latest) ·
 [Quick start](#quick-start) · [Connect an AI agent](#connect-claude-or-codex)
 

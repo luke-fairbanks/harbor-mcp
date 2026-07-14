@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harbor — Know what’s running on your Mac</title>
+  <meta name="description" content="Harbor inventories local development servers, maps them back to projects, flags likely duplicates, starts full stacks, and connects Claude or Codex over MCP.">
+  <meta name="theme-color" content="#071319">
+  <meta property="og:title" content="Harbor — Know what’s running. Stop the port chaos.">
+  <meta property="og:description" content="A free, open-source Mac control center for local servers, full-stack projects, and coding agents.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://luke-fairbanks.github.io/harbor-mcp/">
+  <meta property="og:image" content="https://luke-fairbanks.github.io/harbor-mcp/assets/social-card.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://luke-fairbanks.github.io/harbor-mcp/">
+  <link rel="icon" href="assets/harbor-icon.png">
+  <link rel="stylesheet" href="assets/styles.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareApplication",
+        "name": "Harbor",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS 11 or later",
+        "softwareVersion": "0.5.0",
+        "isAccessibleForFree": true,
+        "license": "https://opensource.org/license/mit",
+        "downloadUrl": "https://github.com/luke-fairbanks/harbor-mcp/releases/latest",
+        "codeRepository": "https://github.com/luke-fairbanks/harbor-mcp",
+        "description": "A local-first Mac control center for discovering local servers, managing project stacks, and connecting Claude or Codex over MCP."
+      },
+      {
+        "@type": "Person",
+        "name": "Luke Fairbanks",
+        "url": "https://github.com/luke-fairbanks"
+      },
+      {
+        "@type": "FAQPage",
+        "mainEntity": [
+          {"@type":"Question","name":"Does Harbor stop every process it finds?","acceptedAnswer":{"@type":"Answer","text":"No. Harbor separates observation from ownership and keeps terminal-, IDE-, and coding-agent-owned process groups monitor-only."}},
+          {"@type":"Question","name":"Does Harbor upload my project data?","acceptedAnswer":{"@type":"Answer","text":"Harbor's inventory and orchestration stay local. It has no account or analytics. Connected AI clients follow their own provider privacy policies."}},
+          {"@type":"Question","name":"Does the MCP connection require Node.js?","acceptedAnswer":{"@type":"Answer","text":"No. Harbor bundles a signed native bridge for Claude Desktop, Claude Code, and Codex."}}
+        ]
+      }
+    ]
+  }
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="shell nav">
+      <a class="brand" href="#top" aria-label="Harbor home">
+        <img src="assets/harbor-icon.png" alt="">
+        <span>Harbor</span>
+        <small>Open source</small>
+      </a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#why">Why Harbor</a>
+        <a href="#safety">Safety</a>
+        <a href="#agents">AI connections</a>
+        <a href="https://github.com/luke-fairbanks/harbor-mcp">GitHub</a>
+        <a class="button compact primary" href="https://github.com/luke-fairbanks/harbor-mcp/releases/latest">Download</a>
+      </nav>
+      <a class="mobile-download" aria-label="Download Harbor" href="https://github.com/luke-fairbanks/harbor-mcp/releases/latest">↓</a>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top">
+      <div class="current current-a" aria-hidden="true"></div>
+      <div class="current current-b" aria-hidden="true"></div>
+      <div class="shell hero-grid">
+        <div class="hero-copy">
+          <div class="eyebrow"><span class="signal-dot"></span>The Mac control center for local development</div>
+          <h1>Know what’s running.<br><span>Stop the port chaos.</span></h1>
+          <p>Harbor turns a Mac full of mystery servers into a clear set of projects. See what every port belongs to, catch likely duplicates, run complete stacks, and give your coding agents the same source of truth.</p>
+          <div class="hero-actions">
+            <a class="button primary large" href="https://github.com/luke-fairbanks/harbor-mcp/releases/latest">Download signed DMG <span aria-hidden="true">↓</span></a>
+            <a class="button large" href="https://github.com/luke-fairbanks/harbor-mcp">View source <span aria-hidden="true">↗</span></a>
+          </div>
+          <p class="microcopy">Free &amp; MIT licensed · No account · No analytics · macOS 11+ · Apple Silicon + Intel</p>
+        </div>
+
+        <div class="hero-product">
+          <div class="orbit-label orbit-one"><span></span>project running</div>
+          <div class="orbit-label orbit-two"><span></span>all services healthy</div>
+          <div class="product-window hero-window">
+            <div class="window-bar">
+              <span class="traffic" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="window-title">Harbor / Overview</span>
+              <span class="window-state"><i></i> scanning</span>
+            </div>
+            <div class="window-screen">
+              <img src="assets/product-overview.png" alt="Harbor Overview showing a healthy running demo project and its service status." width="2296" height="1576" fetchpriority="high">
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="trust-rail" aria-label="Product trust facts">
+      <div class="shell trust-list">
+        <span>Signed &amp; notarized</span>
+        <span>Local-first</span>
+        <span>Identity-checked cleanup</span>
+        <span>Native MCP bridge</span>
+        <span>No account</span>
+      </div>
+    </div>
+
+    <section class="section problem-section" id="why">
+      <div class="shell">
+        <div class="section-heading split-heading">
+          <div>
+            <div class="eyebrow">The mess after “run the app”</div>
+            <h2>Your agent started it.<br>Then started it again.</h2>
+          </div>
+          <p>Starting a dev server is easy. Remembering which terminal owns it, why the port changed, and whether it is safe to stop is the part that quietly gets expensive.</p>
+        </div>
+
+        <div class="port-story" aria-label="Example of duplicate local project runs">
+          <article class="port-card faded">
+            <div class="port-card-top"><span class="status-dot green"></span><span>studio-board</span><strong>:3000</strong></div>
+            <p>Terminal · started 2h ago</p>
+          </article>
+          <div class="port-connector" aria-hidden="true"><span></span><b>same project</b><span></span></div>
+          <article class="port-card warning">
+            <div class="port-card-top"><span class="status-dot amber"></span><span>studio-board</span><strong>:3001</strong></div>
+            <p>Likely duplicate · isolated process</p>
+          </article>
+          <div class="harbor-verdict">
+            <span>Harbor</span>
+            <strong>One project. Two runs.</strong>
+            <p>The terminal-owned server stays monitor-only. The isolated leftover can be reviewed for cleanup.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section features-section">
+      <div class="shell">
+        <div class="section-heading centered">
+          <div class="eyebrow">One calm place for localhost</div>
+          <h2>See it. Run it. Hand it off.</h2>
+          <p>Harbor combines discovery, project orchestration, and agent control without pretending every process belongs to it.</p>
+        </div>
+
+        <div class="feature-grid">
+          <article class="feature-card feature-discover">
+            <div class="feature-index">01 / DISCOVER</div>
+            <h3>Explain every listener</h3>
+            <p>See ports, commands, working folders, HTTP clues, frameworks, project matches, and likely duplicate runs in one inventory.</p>
+            <div class="mini-list" aria-hidden="true">
+              <span><i class="green"></i><b>Studio Board</b><code>:3000</code></span>
+              <span><i class="amber"></i><b>Studio Board</b><code>:3001</code></span>
+              <span><i></i><b>Unknown listener</b><code>:5173</code></span>
+            </div>
+          </article>
+
+          <article class="feature-card feature-run">
+            <div class="feature-index">02 / RUN</div>
+            <h3>Start the project, not five commands</h3>
+            <p>Bring up an entire stack in dependency order. Harbor resolves ports, keeps services wired, collects logs, and applies bounded crash recovery.</p>
+            <div class="service-stack" aria-hidden="true">
+              <span><i></i><b>database</b><em>ready</em></span>
+              <span><i></i><b>api</b><em>:4000</em></span>
+              <span><i></i><b>web</b><em>:3000</em></span>
+            </div>
+          </article>
+
+          <article class="feature-card feature-agents">
+            <div class="feature-index">03 / CONNECT</div>
+            <h3>Give agents the same chart</h3>
+            <p>Claude Desktop, Claude Code, and Codex can inspect servers, read logs, and operate locally approved projects through Harbor’s MCP tools.</p>
+            <div class="agent-row" aria-hidden="true"><span>&gt;_</span><span>C</span><span>CX</span><b>bridge running</b></div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section product-section">
+      <div class="shell">
+        <div class="section-heading centered compact-heading">
+          <div class="eyebrow">The actual app</div>
+          <h2>Built to make the invisible legible.</h2>
+          <p>Current v0.5.0 interface shown with scrubbed demo data.</p>
+        </div>
+
+        <div class="product-showcase">
+          <div class="product-window showcase-window">
+            <div class="window-bar">
+              <span class="traffic" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="window-title">Harbor / v0.5.0</span>
+              <span class="window-state"><i></i> local</span>
+            </div>
+            <div class="window-screen showcase-screen">
+              <img data-screen-image src="assets/product-overview.png" alt="Harbor Overview showing a healthy running demo project." width="2296" height="1576">
+            </div>
+          </div>
+          <div class="screen-switcher" role="tablist" aria-label="Harbor product screens">
+            <button type="button" class="screen-tab" role="tab" aria-selected="true" data-screen="overview">
+              <span>01</span><strong>Overview</strong><small>See projects and service health</small>
+            </button>
+            <button type="button" class="screen-tab" role="tab" aria-selected="false" data-screen="agents">
+              <span>02</span><strong>AI connections</strong><small>Connect Claude and Codex once</small>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section safety-section" id="safety">
+      <div class="shell safety-panel">
+        <div class="safety-copy">
+          <div class="eyebrow">A deliberate safety boundary</div>
+          <h2>Observation is not ownership.</h2>
+          <p>Harbor can recognize a server without pretending it owns the process. Cleanup appears only for isolated, untracked listeners—and only after confirmation plus a fresh identity check.</p>
+          <p>If a process shares a group with Terminal, an IDE, Claude, Codex, or Harbor itself, it stays visible and monitor-only.</p>
+        </div>
+        <div class="safety-ledger" aria-label="Harbor process safety decisions">
+          <div><span class="ledger-signal safe">MONITOR</span><strong>Terminal-owned server</strong><small>Visible · blocks a duplicate launch</small></div>
+          <div><span class="ledger-signal safe">MONITOR</span><strong>IDE or agent process group</strong><small>Never offered for cleanup</small></div>
+          <div><span class="ledger-signal review">REVIEW</span><strong>Isolated leftover</strong><small>Confirmation + fresh PID identity check</small></div>
+          <div><span class="ledger-signal locked">LOCKED</span><strong>Agent-proposed commands</strong><small>Paused until locally approved</small></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section bridge-section" id="agents">
+      <div class="shell bridge-grid">
+        <div class="bridge-copy">
+          <div class="eyebrow">Native Claude + Codex connection</div>
+          <h2>Connect once.<br>Harbor can restart.</h2>
+          <p>The signed native bridge keeps the client side stable while Harbor closes, reopens, or rotates its local MCP token and port.</p>
+          <ul class="check-list">
+            <li>No Node.js or <code>npx</code></li>
+            <li>No bearer token copied into client config</li>
+            <li>No first-run package download</li>
+            <li>Loopback-only endpoint with local approval</li>
+          </ul>
+        </div>
+        <div class="bridge-diagram" aria-label="How the native MCP bridge connects an AI client to Harbor">
+          <div class="bridge-node clients"><small>AI CLIENT</small><strong>Claude / Codex</strong><span>stdio</span></div>
+          <div class="bridge-route"><i></i><span>stable command path</span><i></i></div>
+          <div class="bridge-node native"><small>SIGNED NATIVE BRIDGE</small><strong>Reconnects in place</strong><span>owner-only</span></div>
+          <div class="bridge-route pulse"><i></i><span>follows token + port</span><i></i></div>
+          <div class="bridge-node harbor"><small>HARBOR</small><strong>127.0.0.1 / MCP</strong><span>local approval</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section install-section" id="download">
+      <div class="shell install-panel">
+        <div>
+          <div class="eyebrow">Free and open source</div>
+          <h2>Bring your localhost into Harbor.</h2>
+          <p>Universal for Apple Silicon and Intel. Signed by Faba Development and notarized by Apple.</p>
+        </div>
+        <div class="install-actions">
+          <a class="button primary large full" href="https://github.com/luke-fairbanks/harbor-mcp/releases/latest">Download signed DMG <span>↓</span></a>
+          <div class="brew-command">
+            <code>brew install --cask luke-fairbanks/tap/harbor</code>
+            <button type="button" data-copy-brew aria-label="Copy Homebrew install command">Copy</button>
+          </div>
+          <a class="source-link" href="https://github.com/luke-fairbanks/harbor-mcp">Read the source on GitHub <span>↗</span></a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section faq-section">
+      <div class="shell faq-grid">
+        <div class="section-heading"><div class="eyebrow">Straight answers</div><h2>Before Harbor touches localhost.</h2></div>
+        <div class="faq">
+          <details><summary>Does Harbor stop every server it finds?</summary><p>No. Most discovered servers are observation-only. Harbor keeps processes tied to a terminal, IDE, coding agent, or Harbor itself monitor-only. Only isolated leftovers that pass identity checks can be offered for confirmed cleanup.</p></details>
+          <details><summary>Does Harbor upload my projects or process list?</summary><p>Harbor’s server inventory and orchestration stay on your Mac. There is no account or analytics. Claude, Codex, and other connected clients follow their own provider privacy behavior.</p></details>
+          <details><summary>Does the MCP connection require Node.js?</summary><p>No. Harbor v0.5.0 bundles a signed native bridge. New client configuration contains only its stable command path—no token, environment variables, or package runner.</p></details>
+          <details><summary>Is Harbor a Docker or production process manager?</summary><p>No. Harbor is focused on local macOS development: understanding current-user TCP listeners, mapping them to projects, running local stacks, and giving agents a bounded lifecycle surface.</p></details>
+          <details><summary>Which Macs are supported?</summary><p>Harbor supports macOS 11 Big Sur or later and ships as a universal app for Apple Silicon and Intel.</p></details>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-grid">
+      <div>
+        <a class="brand" href="#top"><img src="assets/harbor-icon.png" alt=""><span>Harbor</span></a>
+        <p>A calm control center for the local servers behind AI-assisted development.</p>
+      </div>
+      <nav class="footer-links" aria-label="Footer">
+        <a href="https://github.com/luke-fairbanks/harbor-mcp/releases">Releases</a>
+        <a href="https://github.com/luke-fairbanks/harbor-mcp/blob/main/ROADMAP.md">Roadmap</a>
+        <a href="https://github.com/luke-fairbanks/harbor-mcp/issues">Support</a>
+        <a href="https://github.com/luke-fairbanks/harbor-mcp">Source</a>
+      </nav>
+    </div>
+    <div class="shell footer-base"><span>MIT licensed · Built in Colorado</span><span>Not affiliated with the CNCF Harbor registry</span></div>
+  </footer>
+
+  <script src="assets/site.js"></script>
+</body>
+</html>
