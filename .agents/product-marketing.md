@@ -86,9 +86,12 @@ Differentiate Harbor on the combination of:
   guarantee that a process has no unsaved state or workflow impact.
 - Config approval is one-time for the exact MCP-created project config. Approved
   lifecycle calls do not trigger a fresh in-app prompt for every action.
-- The restart-safe MCP bridge currently requires Node.js/npx and may fetch the
-  pinned `mcp-remote@0.1.38` adapter on first use. A manual session-scoped HTTP
-  setup exists; a bundled native bridge is roadmap work.
+- The guided MCP setup installs Harbor's signed, owner-only native bridge. New
+  client configs contain only its stable command path: no token, environment
+  variables, Node.js dependency, or first-run download. The bridge can open
+  Harbor quietly and follows token/port changes across normal Harbor restarts.
+  First-time setup, migration from v0.4.2, and a later update that replaces the
+  bridge binary each require one full client restart.
 - Do not claim Docker Compose, public tunnels, stable `.localhost` URLs,
   worktree-aware sessions, Windows, or Linux support. Those are roadmap items.
 - Harbor is unrelated to the CNCF Harbor container registry.
